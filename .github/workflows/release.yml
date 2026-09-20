@@ -1,0 +1,132 @@
+name: Build release packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      # 只在 tag 触发时校验「tag 去掉 v 之后必须等于 package.json 的 version」。
+      # 注意 if 只能加在 step 上：加在 job 上会让 workflow_dispatch 连带跳过所有 needs 它的 job。
+      - name: Validate tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          echo "tag=${GITHUB_REF_NAME} tag_version=${tag_version} package.json=${pkg_version}"
+          if [ "${tag_version}" != "${pkg_version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json version ${pkg_version} 不一致"
+            exit 1
+          fi
+
+  windows:
+    name: Windows x64 (NSIS + portable)
+    needs: validate
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      # env 上下文拿不到 runner 的进程环境变量，LOCALAPPDATA 得先在 shell 里解析出来
+      - name: Resolve cache paths
+        id: cache-paths
+        shell: pwsh
+        run: |
+          "electron=$(Join-Path $env:LOCALAPPDATA 'electron\Cache')" >> $env:GITHUB_OUTPUT
+          "builder=$(Join-Path $env:LOCALAPPDATA 'electron-builder\Cache')" >> $env:GITHUB_OUTPUT
+
+      - name: Cache electron runtime
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.cache-paths.outputs.electron }}
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: electron-${{ runner.os }}-
+
+      - name: Cache electron-builder binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.cache-paths.outputs.builder }}
+          key: eb-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: eb-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build renderer and main
+        run: npm run build
+
+      # 不用 npm run dist：它会先把版本号 +1（和 tag 打架）、在构建机建桌面快捷方式，
+      # 开头那段 set "VAR=..." 还是 CMD 语法，Runner 默认 shell 是 pwsh。
+      - name: Build Windows packages
+        run: npx --no-install electron-builder --win --publish never
+
+      # 只收 release/ 根目录下的 exe（安装版 + 便携版）。
+      # win-unpacked/ 整个解压目录和 .blockmap 都不上传，版本号不能写死。
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: myclis-windows-x64
+          path: release/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - validate
+      - windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows packages
+        uses: actions/download-artifact@v4
+        with:
+          name: myclis-windows-x64
+          path: artifacts
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # view 的重定向不能省：set -e 下「Release 不存在」这个正常分支会被 stderr 干掉
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" artifacts/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" artifacts/* \
+              --verify-tag \
+              --generate-notes \
+              --title "${GITHUB_REF_NAME}"
+          fi

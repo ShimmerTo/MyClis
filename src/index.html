@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>MyClis</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      便签的文件预览要用自定义协议 clichilds-note://note/<id> 内联 pdf / 图片：
+      default-src 'self' 覆盖 frame-src 与 img-src，不显式放行的话自定义 scheme 会被拦。
+      协议本身由主进程按 noteId 取路径，渲染层传不了任意文件路径。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: clichilds-note:; frame-src 'self' data: clichilds-note:; object-src 'self' clichilds-note:"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>

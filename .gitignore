@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist/
+release/
+*.log
+*.tsbuildinfo
+.DS_Store
+.idea/
+.clichilds/
+.demovid/

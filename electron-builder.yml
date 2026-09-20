@@ -1,0 +1,31 @@
+appId: com.myclis.app
+# 打包产物（exe / 安装包 / 快捷方式）统一叫 myclis。
+# 注意：package.json 的 name 保持 clichilds 不动 —— Electron 的 userData 目录取自
+# app.getName()（= package.json 的 name），改了会把 %APPDATA%/clichilds 下的既有配置与会话历史丢掉。
+productName: myclis
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**
+  # 窗口/任务栏图标（运行时读，见 electron/main.ts）
+  - build/icon.png
+  - '!**/*.map'
+# node-pty 的 win32 原生二进制不能进 asar
+asarUnpack:
+  - '**/node_modules/@lydell/node-pty/**'
+  - '**/node_modules/@lydell/node-pty-win32-x64/**'
+win:
+  # exe 内嵌图标（任务栏用的就是它），与托盘图标同一套设计
+  icon: build/icon.ico
+  target:
+    - nsis
+    - portable
+  artifactName: ${productName}-setup-${version}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: myclis
+portable:
+  artifactName: ${productName}-portable-${version}.${ext}
