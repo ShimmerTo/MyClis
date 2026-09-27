@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import { basename, join, resolve } from 'path'
 import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs'
+import { workspaceRelativePath } from '../sessions/workspace'
 
 /** 超过这个时长的临时文件视为上次崩溃留下的残骸，写新文件时顺手清掉 */
 const STALE_MS = 24 * 60 * 60 * 1000
@@ -20,15 +21,14 @@ export interface PromptFile {
 /** 命令行里的单行引导语：短、无引号、无 shell 特殊字符 */
 export const PROMPT_LEAD = '请先按下面引用的任务文件执行'
 
-const SUBDIR = '.clichilds/prompts'
-
-export function writePromptFile(workDir: string, text: string): PromptFile {
-  const dir = join(resolve(workDir), SUBDIR)
+export function writePromptFile(workDir: string, text: string, workspaceSessionId: string): PromptFile {
+  const subdir = `${workspaceRelativePath(workspaceSessionId)}/prompts`
+  const dir = join(resolve(workDir), subdir)
   mkdirSync(dir, { recursive: true })
   sweepStale(dir)
   const abs = join(dir, `${randomUUID()}.md`)
   writeFileSync(abs, text, 'utf-8')
-  return { rel: `${SUBDIR}/${basename(abs)}`, abs }
+  return { rel: `${subdir}/${basename(abs)}`, abs }
 }
 
 /**

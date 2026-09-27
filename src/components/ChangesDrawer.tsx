@@ -169,16 +169,42 @@ export function ChangesTrigger({ session }: { session: ChangesSession }): JSX.El
   if (session.count === 0) return null
   return (
     <button
-      className="output-trigger"
-      title="查看工作目录的变更文件与改动内容"
+      className="output-trigger status-pill"
+      title={`工作目录有 ${session.count} 个文件变动，点击查看变更文件与改动内容`}
       onClick={() => session.setOpen(!session.open)}
     >
-      {session.count} 个文件变动
+      <IconChanges />
+      <span className="status-count">{session.count}</span>
     </button>
   )
 }
 
 /* ---------------- 图标：统一细线 1px / 16px 网格，跟表头那组同风格 ---------------- */
+
+/** 状态栏变更入口：git 标志（菱形外框 + 主干与分支三个节点） */
+function IconChanges(): JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="13"
+      height="13"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M8 1.3 14.7 8 8 14.7 1.3 8Z" />
+      <path d="M6.2 6.1v3.7" />
+      <path d="M10.2 7.6v.6a1.9 1.9 0 0 1-1.9 1.9h-.7" />
+      <circle cx="6.2" cy="5.1" r="1" />
+      <circle cx="6.2" cy="10.9" r="1" />
+      <circle cx="10.2" cy="6.5" r="1" />
+    </svg>
+  )
+}
 
 function IconSplit(): JSX.Element {
   return (

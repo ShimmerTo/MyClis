@@ -5,6 +5,7 @@ import { windowsHide } from '../util'
 import type { CliStatus } from '../../shared/types'
 import { adapters } from './registry'
 import type { CliAdapter } from './types'
+import { versionNumber, withLatestVersion } from './management'
 
 /** 缓存：id -> 解析出的可执行路径（detectAll 后填充；launch 前确保已 detect） */
 const resolved = new Map<string, string | null>()
@@ -31,7 +32,7 @@ function probe(cmd: string): Promise<string | null> {
   })
 }
 
-function version(bin: string): Promise<string | undefined> {
+function version(bin: string): Promise<{ version?: string; error?: string }> {
   return new Promise((resolve) => {
     const quoted = /\s/.test(bin) ? `"${bin}"` : bin
     execFile(
@@ -39,12 +40,20 @@ function version(bin: string): Promise<string | undefined> {
       ['/d', '/s', '/c', `${quoted} --version`],
       { windowsHide, timeout: 15000 },
       (err, stdout, stderr) => {
-        if (err) return resolve(undefined)
-        const line = `${stdout}${stderr}`
+        if (err) {
+          const missingCodex = /Missing optional dependency (@openai\/codex-win32-(?:x64|arm64))\b/.exec(`${stdout}\n${stderr}`)
+          console.error('CLI 版本检测失败', { bin, code: err.code, killed: err.killed, missingDependency: missingCodex?.[1] })
+          let error = '--version 执行失败，请在系统终端运行该命令检查安装及启动环境'
+          if (missingCodex) error = `Codex 的 Windows 运行文件缺失（${missingCodex[1]}），请重新安装 Codex 后再检测`
+          else if (err.killed) error = '--version 执行超时，请检查 CLI 能否正常启动后重新检测'
+          resolve({ error })
+          return
+        }
+        const line = `${stdout}\n${stderr}`
           .split(/\r?\n/)
           .map((s) => s.trim())
           .find((s) => s)
-        resolve(line || undefined)
+        resolve({ version: line || undefined })
       }
     )
   })
@@ -72,17 +81,21 @@ export async function detectAll(): Promise<CliStatus[]> {
       if (!bin) {
         return { id: a.id, label: a.label, installed: false, permissionOptions: a.permissionOptions, ...capabilities }
       }
-      const ver = await version(bin)
-      const diagnostics = ver ? [] : [`${bin} 存在，但执行 --version 失败；启动环境可能不完整`]
+      const probeResult = await version(bin)
+      const ver = probeResult.version
+      const knownVersion = versionNumber(ver)
+      const diagnostics: string[] = []
+      if (probeResult.error) diagnostics.push(probeResult.error)
+      else if (!ver) diagnostics.push('--version 未返回任何版本信息，请检查 CLI 安装后重新检测')
+      else if (!knownVersion) diagnostics.push('--version 已返回，但版本号无法识别；请核查 CLI 安装及 PATH')
       if (a.id === 'codebuddy') {
         const adjacentNode = join(dirname(bin), 'node.exe')
         const packageRoot = join(dirname(bin), 'node_modules', '@tencent-ai', 'codebuddy-code')
         const entrypoint = join(packageRoot, 'bin', 'codebuddy')
         const pathNode = await probe('node')
-        diagnostics.push(`CodeBuddy 启动脚本：${bin}`)
-        diagnostics.push(`CodeBuddy 包目录：${existsSync(packageRoot) ? packageRoot : '未找到'}`)
-        diagnostics.push(`CodeBuddy 入口：${existsSync(entrypoint) ? entrypoint : '未找到'}`)
-        diagnostics.push(`实际 Node：${existsSync(adjacentNode) ? adjacentNode : (pathNode ?? '未找到')}`)
+        // 只留真正会被执行的两条：包入口 + 跑它的 node。脚本与包目录已在卡片上方显示为 path
+        const node = existsSync(adjacentNode) ? adjacentNode : (pathNode ?? '未找到')
+        diagnostics.push(`CodeBuddy 入口：${existsSync(entrypoint) ? entrypoint : '未找到'} · Node：${node}`)
       }
       return {
         id: a.id,
@@ -91,13 +104,13 @@ export async function detectAll(): Promise<CliStatus[]> {
         path: bin,
         version: ver,
         permissionOptions: a.permissionOptions,
-        health: ver ? 'ok' : 'warning',
+        health: probeResult.error ? 'broken' : knownVersion ? 'ok' : 'warning',
         diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
         ...capabilities
       }
     })
   )
-  return results
+  return Promise.all(results.map(withLatestVersion))
 }
 
 /** 取已解析的二进制路径；若未检测过则现场解析 */

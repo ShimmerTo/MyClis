@@ -1,0 +1,112 @@
+.ssh-ui { color: var(--text); font-size: 13px; line-height: 1.55; min-width: 0; }
+.ssh-page { display: flex; flex-direction: column; gap: 14px; max-width: 1220px; width: 100%; min-height: 0; padding: 18px 22px 36px; overflow: auto; box-sizing: border-box; }
+.ssh-ui h2, .ssh-ui h3, .ssh-ui h4, .ssh-ui h5 { margin: 0 0 9px; }
+.ssh-ui h2 { font-size: 23px; }
+.ssh-ui h3 { font-size: 16px; }
+.ssh-ui h4 { font-size: 14px; }
+.ssh-ui h5 { font-size: 13px; }
+.ssh-ui p { margin: 7px 0; overflow-wrap: anywhere; }
+.ssh-ui button, .ssh-status-trigger { -webkit-app-region: no-drag; }
+.ssh-ui button { white-space: normal; }
+.ssh-ui input, .ssh-ui select, .ssh-ui textarea { width: 100%; box-sizing: border-box; min-width: 0; }
+.ssh-ui input[type='checkbox'] { width: auto; flex: none; }
+.ssh-ui input, .ssh-ui textarea { font-size: 13px; }
+.ssh-ui textarea { resize: vertical; min-height: 68px; max-height: 230px; }
+.ssh-ui fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.ssh-ui fieldset:disabled { opacity: .65; }
+.ssh-ui label { min-width: 0; }
+.ssh-ui pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 Consolas, monospace; background: var(--bg-input); border: 1px solid var(--border); padding: 10px; border-radius: 5px; max-height: 240px; overflow: auto; user-select: text; unicode-bidi: plaintext; }
+.ssh-section { border: 1px solid var(--border); border-radius: 8px; padding: 16px; background: var(--bg-panel); min-width: 0; }
+.ssh-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.ssh-row h2, .ssh-row h3 { margin: 0; }
+.ssh-muted, .ssh-field small { color: var(--text-dim); }
+.ssh-error { color: var(--err, var(--warn)); white-space: pre-wrap; overflow-wrap: anywhere; border-left: 3px solid currentColor; padding: 7px 10px; }
+.ssh-warning { color: var(--warn); overflow-wrap: anywhere; }
+.ssh-success { color: var(--accent); }
+.ssh-tag { display: inline-flex; font-size: 12px; padding: 1px 7px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-dim); }
+.ssh-identity, .ssh-fingerprint { overflow-wrap: anywhere; white-space: pre-wrap; unicode-bidi: plaintext; }
+.ssh-fingerprint { font-family: Consolas, monospace; user-select: text; }
+.ssh-field { display: flex; flex-direction: column; gap: 5px; margin: 7px 0; }
+.ssh-field > span { font-weight: 500; }
+.ssh-form-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px 16px; }
+.ssh-wide { grid-column: 1 / -1; }
+.ssh-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.ssh-connections { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.ssh-runtime { border-top: 1px solid var(--border); padding: 8px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ssh-runtime .ssh-error { width: 100%; }
+.ssh-inline-auth { width: 100%; box-sizing: border-box; margin-top: 6px; padding: 10px 12px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 5px; background: var(--bg-panel); display: flex; flex-direction: column; gap: 4px; }
+.ssh-inline-auth .ssh-actions { margin-top: 6px; }
+.ssh-projects { border-top: 1px solid var(--border); margin-top: 8px; padding: 6px 0 8px; display: flex; flex-direction: column; gap: 4px; }
+.ssh-projects > p { margin: 2px 0; }
+.ssh-project-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.ssh-project-name { font-weight: 600; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ssh-project-line .ssh-check { padding: 2px 0; border: 0; margin: 0; align-items: center; min-width: 0; }
+.ssh-project-line .ssh-check input { margin-top: 0; }
+/* 项目行里的按钮要和同行的标签一样矮，不能占满全局按钮的 30px */
+.ssh-project-line button { height: 22px; padding: 0 9px; font-size: 12px; }
+.ssh-project-line .ssh-check span { overflow-wrap: anywhere; }
+.ssh-project-line .ssh-tag { font-size: 11px; }
+/* 每个关联项目展示为一张小卡片，鼠标移上去才露出权限设置 / 解除关联两个图标按钮 */
+.ssh-project-card { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-input); }
+.ssh-project-card .ssh-project-name { font-weight: 600; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ssh-project-card .ssh-muted { overflow-wrap: anywhere; }
+.ssh-project-tools { margin-left: auto; display: inline-flex; gap: 4px; opacity: 0; transition: opacity .12s ease; }
+.ssh-project-card:hover .ssh-project-tools, .ssh-project-card:focus-within .ssh-project-tools { opacity: 1; }
+.ssh-icon-btn { width: 24px; height: 24px; min-height: 0; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 5px; background: var(--bg-panel); color: var(--text-dim); }
+.ssh-icon-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+/* 解除关联这类破坏性图标按钮：平时就显红，提醒它不是普通设置 */
+.ssh-icon-btn-danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
+.ssh-icon-btn-danger:hover:not(:disabled) { color: var(--err); border-color: var(--err); background: var(--err-soft); }
+/* 右上角短时提示：连接测试结果等，停留到点自动消失，也可手动关掉。
+   top 要让开右上角原生窗口按钮（最小化/最大化/关闭画在网页内容之上，压不住），否则会叠在按钮下面。 */
+.ssh-toasts { position: fixed; top: 46px; right: 16px; z-index: 2147483000; display: flex; flex-direction: column; gap: 8px; max-width: 360px; }
+.ssh-toast { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); box-shadow: 0 4px 14px rgba(0, 0, 0, .28); font-size: 13px; }
+.ssh-toast span { flex: 1; overflow-wrap: anywhere; }
+.ssh-toast button { width: auto; height: auto; min-height: 0; padding: 0 2px; border: 0; background: transparent; color: var(--text-dim); font-size: 13px; }
+.ssh-toast button:hover { border: 0; background: transparent; color: var(--text); }
+.ssh-toast-success { border-left: 3px solid var(--ok); }
+.ssh-toast-success span { color: var(--ok); }
+.ssh-toast-error { border-left: 3px solid var(--err, var(--warn)); }
+.ssh-toast-info { border-left: 3px solid var(--text-dim); }
+/* 测试连接进行中的转圈指示 */
+.ssh-spinner { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -2px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: ssh-spin .7s linear infinite; }
+@keyframes ssh-spin { to { transform: rotate(360deg); } }
+/* 权限设置弹窗：内容限高出滚动条，保存按钮不用拖到页面最底下才能碰到 */
+.ssh-grant-modal .approval-dialog { width: min(820px, 96vw); }
+.ssh-grant-modal .approval-dialog-body { max-height: calc(100dvh - 150px); overflow: auto; scrollbar-gutter: stable; }
+.ssh-grant { margin: 0; }
+.ssh-policy { padding: 12px; border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: 5px; margin: 16px 0; }
+.ssh-template-group { border: 1px solid var(--border); padding: 12px; border-radius: 6px; margin: 10px 0; }
+.ssh-template-group .ssh-actions { justify-content: flex-start; margin: 0 0 8px; }
+.ssh-template-choice { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; }
+.ssh-template-choice small { display: block; color: var(--text-dim); }
+.ssh-template-choice input { margin-top: 4px; }
+.ssh-check { display: flex; align-items: flex-start; gap: 8px; padding: 12px; border: 1px solid var(--warn); border-radius: 5px; margin-top: 14px; }
+.ssh-check input { margin-top: 4px; }
+.ssh-confirm { padding: 12px; border: 1px solid var(--warn); border-radius: 5px; margin-top: 10px; }
+/* 页面顶部工具行：服务器台数在左，新建连接在右 */
+.ssh-head { display: flex; align-items: center; gap: 10px; }
+.ssh-head .spacer { flex: 1; }
+.ssh-result { min-height: 0; }
+.approval-inline .ssh-result { overflow: auto; max-height: 130px; }
+.ssh-status-trigger { flex: 0 0 auto; display: inline-block; height: 18px; padding: 0 7px; border: 0; border-radius: 9px; background: transparent; color: var(--text-dim); font: 11px/1 Consolas, 'Cascadia Mono', monospace; line-height: 18px; white-space: nowrap; max-width: 100%; }
+.ssh-status-trigger:hover:not(:disabled) { border: 0; background: var(--bg-hover); color: var(--text); }
+.ssh-status-trigger.ssh-warning { color: var(--warn); }
+.ssh-status-trigger strong { color: var(--warn); }
+.ssh-todo { width: 100%; display: flex; flex-direction: column; align-items: flex-start; text-align: left; overflow-wrap: anywhere; margin: 10px 0; gap: 4px; }
+.ssh-todo span { white-space: normal; }
+.ssh-manager-modal .approval-dialog { width: min(1160px, 96vw); height: calc(100dvh - 58px); }
+.ssh-manager-modal .approval-dialog-body { padding: 0; }
+.ssh-manager-modal .ssh-page { max-width: none; }
+.ssh-terminal-modal .approval-dialog { width: min(1120px, 96vw); height: min(790px, calc(100dvh - 48px)); }
+.ssh-terminal-modal .approval-dialog-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.ssh-terminal-layout { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.ssh-terminal-layout > .ssh-row, .ssh-terminal-layout > .ssh-actions { flex-shrink: 0; }
+.ssh-terminal-layout > .ssh-error { max-height: 70px; overflow: auto; }
+.ssh-terminal-surface { flex: 1; min-height: 100px; background: var(--term-bg, var(--bg-input)); border: 1px solid var(--border); padding: 6px; overflow: hidden; }
+.ssh-xterm-host { width: 100%; height: 100%; }
+.ssh-maximized { padding: 8px; }
+.ssh-maximized .approval-dialog { width: calc(100vw - 16px); height: calc(100dvh - 16px); max-height: calc(100dvh - 16px); }
+@media (max-width: 1050px) {
+  .ssh-page { padding: 14px; }
+}

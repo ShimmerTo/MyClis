@@ -1,5 +1,6 @@
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { DEFAULT_NOTES_DIR } from '@shared/types'
 import type { ThemeKind } from '@shared/types'
 import { dirBase } from './notes'
 import { toast } from './components/ToastHost'
@@ -113,17 +114,17 @@ function create(termId: string): Pooled {
     .catch(() => undefined)
 
   const insertPaste = async (text: string): Promise<void> => {
-    // 剪贴板是截图时：主进程落盘 PNG，把绝对路径粘进终端；否则按原样粘文本
     try {
-      const imgPath = await window.clichilds.pasteImage()
-      if (imgPath) {
-        term.paste(/\s/.test(imgPath) ? `"${imgPath}"` : imgPath)
+      const paths = await window.clichilds.pasteFiles()
+      if (pool.get(termId)?.term !== term) return
+      if (paths.length > 0) {
+        term.paste(paths.map((path) => `"${path}"`).join(' '))
         return
       }
     } catch {
-      // 主进程异常时退回文本粘贴
+      toast('读取剪贴板文件或图片失败')
     }
-    if (text) term.paste(text)
+    if (text && pool.get(termId)?.term === term) term.paste(text)
   }
 
   // 右键菜单「粘贴」没有 DOM 事件可用，只能自己读剪贴板
@@ -132,7 +133,7 @@ function create(termId: string): Pooled {
     try {
       text = await navigator.clipboard.readText()
     } catch {
-      // 读不到文本时只处理截图
+      // 读不到文本时仍可读取文件路径或截图。
     }
     await insertPaste(text)
   }
@@ -296,12 +297,13 @@ function create(termId: string): Pooled {
     if (p.action === 'paste') void pasteFromClipboard()
     if (p.action === 'selectAll') term.selectAll()
     if (p.action === 'clear') term.clear()
-    if (p.action === 'addNote') {
+    if (p.action === 'addNote' || p.action === 'saveNote') {
       const text = rightClickSelection
       rightClickSelection = ''
-      if (!text.trim() || !p.workDir) return
+      const workDir = p.action === 'saveNote' ? DEFAULT_NOTES_DIR : p.workDir
+      if (!text.trim() || !workDir) return
       void window.clichilds
-        .notesAdd({ workDir: p.workDir, kind: 'text', content: text })
+        .notesAdd({ workDir, kind: 'text', content: text })
         .then((note) => toast(`已加入便签（${dirBase(note.workDir)}）：${note.title}`))
         .catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)))
     }
@@ -364,6 +366,13 @@ function pinViewport(entry: Pooled, memo?: { line: number; atBottom: boolean }):
       : Math.round((memo.line * vp.scrollHeight) / lines)
   if (Math.abs(vp.scrollTop - top) < 1) return
   vp.scrollTop = top
+}
+
+export function terminalSelectionAt(target: Element): string {
+  for (const entry of pool.values()) {
+    if (entry.host.isConnected && entry.host.contains(target)) return entry.term.getSelection()
+  }
+  return ''
 }
 
 /** 把该会话的终端搬进容器；实例还在就直接复用，等于原地保留画面 */

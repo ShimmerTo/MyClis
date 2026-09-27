@@ -7,7 +7,7 @@ import { buildNotesCopyText, dirBase, ipcErrorText, notesForDir, notesShowDone, 
 import { useNoteIntake } from '../noteIntake'
 import { focusTerminal } from '../terminalPool'
 import { ConfirmDialog } from './ConfirmDialog'
-import { NoteItem } from './NoteItem'
+import { NoteList } from './NoteList'
 import { toast } from './ToastHost'
 
 interface PanelRect {
@@ -136,7 +136,7 @@ export function NotesTrigger({
     <>
       <button
         type="button"
-        className={`notes-trigger ${openCount > 0 ? 'has' : ''}`}
+        className="notes-trigger"
         title={`便签：${openCount} 条（${dirBase(workDir)}）`}
         onClick={() => setOpen((v) => !v)}
       >
@@ -245,11 +245,9 @@ function NotesPanel({
     window.addEventListener('pointerup', up, { once: true })
   }
 
-  const save = (id: string, patch: { title: string; content: string }): void => {
-    void window.clichilds
-      .notesUpdate({ id, ...patch })
-      .then(() => setFreshId(''))
-      .catch((error: unknown) => toast(ipcErrorText(error)))
+  const save = async (id: string, patch: { title: string; content: string }): Promise<void> => {
+    await window.clichilds.notesUpdate({ id, ...patch })
+    setFreshId('')
   }
 
   const remove = (id: string): void => {
@@ -365,16 +363,7 @@ function NotesPanel({
         ) : visible.length === 0 ? (
           <p className="hint">已完成的 {notes.length} 条便签默认隐藏 —— 勾选顶部的「显示已完成」查看。</p>
         ) : (
-          visible.map((note) => (
-            <NoteItem
-              key={note.id}
-              note={note}
-              autoEdit={note.id === freshId}
-              onSave={(patch) => save(note.id, patch)}
-              onRemove={() => remove(note.id)}
-              onExecute={onExecuteNote ? () => onExecuteNote(note) : undefined}
-            />
-          ))
+          <NoteList notes={visible} freshId={freshId} onSave={save} onRemove={remove} onExecute={onExecuteNote} />
         )}
       </div>
       <div className="notes-panel-foot">

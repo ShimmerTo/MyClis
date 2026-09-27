@@ -19,7 +19,7 @@ interface Props {
   onResizeStart?: (event: ReactPointerEvent<HTMLDivElement>, id: string) => void
 }
 
-const TASK_LABEL = { design: '方案校验', write: '代码编写', review: '代码检查' } as const
+const TASK_LABEL = { design: '方案校验', write: '代码编写', review: '代码检查', custom: '自定义命令' } as const
 
 const dirBase = (p: string): string => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p
 
@@ -140,7 +140,7 @@ export default function ReviewerPanel({
             />
           </svg>
         </button>
-        <button className="reviewer-icon" onClick={() => onMinimize(info.id)} title="最小化到顶部隐藏栏">
+        <button className="reviewer-icon" onClick={() => onMinimize(info.id)} title="收起到状态栏子 CLI 列表">
           —
         </button>
         <button className="reviewer-icon" onClick={() => onClose(info.id)} title="关闭">

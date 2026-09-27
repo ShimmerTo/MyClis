@@ -7,12 +7,34 @@ import type {
   HistoryRecord,
   Note,
   SessionSummary,
-  ThemeKind
+  ThemeKind,
+  UpdateState
 } from '@shared/types'
 
 // 模块级缓存：切换页面时直接复用，避免重复 IPC 造成的「加载中…」闪烁
 let cfgCache: AppConfig | null = null
 let cliCache: CliStatus[] | null = null
+const cliSubs = new Set<(clis: CliStatus[]) => void>()
+
+function adoptCliStatuses(statuses: CliStatus[]): void {
+  cliCache = statuses
+  for (const listener of cliSubs) listener(statuses)
+}
+
+export function adoptCliStatus(status: CliStatus): void {
+  const existing = cliCache ?? []
+  adoptCliStatuses(existing.some((item) => item.id === status.id)
+    ? existing.map((item) => item.id === status.id ? status : item)
+    : [...existing, status])
+}
+
+let detecting: Promise<void> | null = null
+export function refreshCliStatuses(): Promise<void> {
+  if (!detecting) {
+    detecting = window.clichilds.cliDetect().then(adoptCliStatuses).finally(() => { detecting = null })
+  }
+  return detecting
+}
 /** 存活会话快照缓存：工作台刚挂载时先拿上次快照，不然首帧的空列表会把标签误判成「已退出」 */
 let sessionsCache: SessionSummary[] = []
 /** 便签缓存：整表推送，切页时直接复用 */
@@ -27,15 +49,16 @@ export function useSettings() {
   useEffect(() => {
     if (cfgCache && cliCache) return
     let alive = true
-    Promise.all([window.clichilds.configGet(), window.clichilds.cliDetect()])
-      .then(([c, list]) => {
+    if (!cfgCache) {
+      void window.clichilds.configGet().then((c) => {
         if (!alive) return
         cfgCache = c
-        cliCache = list
         setCfg(c)
-        setClis(list)
-      })
-      .catch((e: unknown) => alive && setLoadError(String(e)))
+      }).catch((e: unknown) => alive && setLoadError(String(e)))
+    }
+    if (!cliCache) {
+      void refreshCliStatuses().catch((e: unknown) => alive && setLoadError(String(e)))
+    }
     return () => {
       alive = false
     }
@@ -44,16 +67,14 @@ export function useSettings() {
   useEffect(() => {
     const fn = (c: AppConfig): void => setCfg(c)
     cfgSubs.add(fn)
+    cliSubs.add(setClis)
     return () => {
       cfgSubs.delete(fn)
+      cliSubs.delete(setClis)
     }
   }, [])
 
-  const redetect = useCallback(async () => {
-    const list = await window.clichilds.cliDetect()
-    cliCache = list
-    setClis(list)
-  }, [])
+  const redetect = useCallback(refreshCliStatuses, [])
 
   return { cfg, setCfg, clis, redetect, loadError }
 }
@@ -69,7 +90,11 @@ export function saveConfig(cfg: AppConfig): Promise<void> {
   return write
 }
 
-/** 配置缓存更新订阅：主进程侧改了配置（如便签迁移）并回传新配置时通知各页面 */
+export function waitForConfigSaves(): Promise<void> {
+  return saveQueue
+}
+
+/** 配置缓存更新订阅：主进程侧改了配置并回传新配置时通知各页面 */
 const cfgSubs = new Set<(c: AppConfig) => void>()
 
 /** 接受一份「主进程已生效」的配置：只更新缓存并通知，不再回写 IPC */
@@ -88,16 +113,17 @@ export interface StartMainOpts {
   resumeSessionId?: string
   /** 就绪后自动投递的初始提示词（如「用其他 CLI 继续」的交接说明） */
   initialPrompt?: string
+  noteIds?: string[]
   /** 主动新建场景（工作台「+」）：跳过 StrictMode 合并，两个同参会话要各拉一个 pty */
   fresh?: boolean
 }
 
 export function startMainSession(opts: StartMainOpts): Promise<string> {
-  const { workDir, profileId, resumeSessionId, initialPrompt, fresh = false } = opts
+  const { workDir, profileId, resumeSessionId, initialPrompt, noteIds, fresh = false } = opts
   const key = `${profileId}|${workDir}|${resumeSessionId ?? ''}`
   if (!fresh && pendingStart && pendingStart.key === key) return pendingStart.promise
   const promise = window.clichilds
-    .sessionStart({ workDir, profileId, resumeSessionId, initialPrompt })
+    .sessionStart({ workDir, profileId, resumeSessionId, initialPrompt, noteIds })
     .then((r) => {
       setTimeout(() => {
         if (pendingStart?.promise === promise) pendingStart = null
@@ -176,6 +202,36 @@ export function useNotes(): Note[] {
     }
   }, [])
   return notes
+}
+
+/** 更新状态缓存：设置页与侧栏红点共用，避免各自拉一次 */
+let updateCache: UpdateState | null = null
+
+/** 自动更新状态：主进程检测/下载/安装完成后推送 */
+export function useUpdateState(): UpdateState | null {
+  const [state, setState] = useState<UpdateState | null>(updateCache)
+  useEffect(() => {
+    let alive = true
+    const adopt = (next: UpdateState): void => {
+      updateCache = next
+      if (alive) setState(next)
+    }
+    window.clichilds.updateState().then(adopt).catch(() => undefined)
+    const off = window.clichilds.onUpdateChanged(adopt)
+    return () => {
+      alive = false
+      off()
+    }
+  }, [])
+  return state
+}
+
+/** 有没有没看过的新版本：红点只认没标记过且还没装上的版本 */
+export function hasUnseenUpdate(state: UpdateState | null): boolean {
+  if (!state?.latest) return false
+  if (!state.packaged) return false
+  if (state.phase === 'ready' || state.phase === 'downloading') return false
+  return state.latest.version !== state.config.lastDismissedVersion
 }
 
 /**

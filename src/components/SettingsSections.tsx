@@ -209,18 +209,21 @@ export function CliConfigListEditor(props: {
                 update({ model: e.target.value })
               }}
             />
-            <select
-              className={permission?.dangerous ? 'danger-select' : ''}
-              value={permission?.id ?? 'default'}
-              title={permission?.description}
-              onChange={(e) => update({ permissionMode: e.target.value })}
-            >
-              {permissionOptions.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+            <label className="permission-cell">
+              <span className="cell-label">运行权限</span>
+              <select
+                className={permission?.dangerous ? 'danger-select' : ''}
+                value={permission?.id ?? 'default'}
+                title={permission?.description}
+                onChange={(e) => update({ permissionMode: e.target.value })}
+              >
+                {permissionOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <span className="permission-hint" title={permission?.description}>
               {permission?.description}
             </span>

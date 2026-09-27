@@ -1,4 +1,6 @@
 // 主进程与渲染进程共用的类型与 IPC 通道定义
+import type { SshHostApi } from './ssh'
+import type { DatabaseHostApi } from './database'
 
 export type CliId = 'codex' | 'qoder' | 'codebuddy' | 'pi'
 
@@ -73,22 +75,75 @@ export interface NotificationConfig {
   cliIdle: boolean
 }
 
+/** 自动更新设置 */
+export interface UpdateConfig {
+  /** 发现新版后自动把安装包下载下来；下次启动时拉起安装程序静默安装 */
+  autoDownload: boolean
+  /** 用户已经看过的版本号，用来消掉设置入口的红点 */
+  lastDismissedVersion: string
+}
+
+/** 更新阶段：无新版 / 有新版 / 下载中 / 已下载待安装 / 出错 */
+export type UpdatePhase = 'idle' | 'available' | 'downloading' | 'ready' | 'failed'
+
+/** GitHub Release 里挑出来的一个新版本 */
+export interface UpdateInfo {
+  /** 规范版本号（去掉 tag 的前缀 v） */
+  version: string
+  tag: string
+  publishedAt?: string
+  /** Release 正文，直接作为更新日志展示 */
+  notes: string
+  releaseUrl: string
+  asset: {
+    name: string
+    url: string
+    size: number
+    /** .sha256 摘要文件的下载地址；没有该文件时为空，此时只校验文件大小 */
+    digestUrl?: string
+  }
+}
+
+/** 更新面板要展示的全部状态；主进程算好推给渲染层，渲染层不自己判断版本大小 */
+export interface UpdateState {
+  currentVersion: string
+  /** 未打包（开发版）时不检测也不安装 */
+  packaged: boolean
+  phase: UpdatePhase
+  latest?: UpdateInfo
+  /** 已经下载完成、等着下次启动安装的版本 */
+  downloadedVersion?: string
+  /** 下载进度（0~1），只在 downloading 阶段有意义 */
+  progress?: number
+  error?: string
+  config: UpdateConfig
+}
+
 /** 便签浮窗的收起方式：pinned = 展开后常驻（点外面不收起）；blur = 失去焦点后隐藏 */
 export type NotePanelMode = 'pinned' | 'blur'
 
 /** 便签设置 */
 export interface NotesConfig {
-  /** 便签存储目录（notes.json 与 notes-assets/ 的父目录）；空 = 默认 userData/clichilds */
-  storageDir: string
   /** 浮窗行为 */
   panelMode: NotePanelMode
+  selectionCaptureEnabled: boolean
 }
+
+// 逻辑归属标识，不是真实路径，也不能用作 CLI 工作目录。
+export const DEFAULT_NOTES_DIR = 'myclis:default-notes'
+export const LOCAL_NOTE_SELECTION_EVENT = 'myclis-note-selection-inspect'
+export interface NoteSelectionInput { text: string; x: number; y: number }
 
 /** 子任务执行策略 */
 export interface ReviewConfig {
   /** 子任务从被拉起那一刻起，多久还没写出结果文件就算失败（分钟） */
   childTimeoutMinutes: number
+  pollIntervalMinutes: number
 }
+
+export const DEFAULT_POLL_INTERVAL_MINUTES = 1
+export const POLL_INTERVAL_MIN_MINUTES = 1
+export const POLL_INTERVAL_MAX_MINUTES = 30
 
 /** 子任务结果超时：默认 1 小时，可配置区间 5 ~ 720 分钟 */
 export const DEFAULT_CHILD_TIMEOUT_MINUTES = 60
@@ -151,10 +206,12 @@ export interface AppConfig {
   review: ReviewConfig
   theme: ThemeKind
   ui: UiConfig
-  /** 便签存储目录与浮窗行为 */
+  /** 便签浮窗行为 */
   notes: NotesConfig
   /** 系统通知开关 */
   notifications: NotificationConfig
+  /** 自动更新设置 */
+  update: UpdateConfig
   /** 点窗口关闭按钮时：true = 隐藏到托盘继续跑；false = 直接退出应用 */
   closeToTray: boolean
 }
@@ -166,6 +223,9 @@ export interface CliStatus {
   installed: boolean
   path?: string
   version?: string
+  latestVersion?: string
+  updateAvailable?: boolean
+  updateError?: string
   permissionOptions: CliPermissionOption[]
   health?: 'ok' | 'warning' | 'broken'
   diagnostics?: string[]
@@ -184,7 +244,7 @@ export interface CliTestResult {
   error?: string
 }
 
-export type TriggerKind = 'design' | 'write' | 'review'
+export type TriggerKind = 'design' | 'write' | 'review' | 'custom'
 
 export type TerminalPhase = 'booting' | 'ready' | 'delivering' | 'running' | 'done' | 'error'
 
@@ -194,6 +254,7 @@ export interface TerminalRuntimeState {
   changedAt: number
   deliveryAttempt?: number
   submissionUncertain?: boolean
+  approval?: ChildApproval
 }
 
 export interface TokenUsage {
@@ -215,6 +276,7 @@ export interface TriggerRequest {
   workDir: string
   /** 系统提示里给出的本会话 id；填错或会话已结束会被拒绝，省略则回退到该目录最近启动的主会话 */
   session?: string
+  commandId?: string
   /** 主 CLI 在 workDir 内生成的总览留痕文档；子终端一律只读参考 */
   documentPath: string
   /** 主 CLI 逐个下发的任务；不填则回落到按类型内置文案 + 共用 documentPath */
@@ -229,6 +291,28 @@ export interface TriggerTarget {
   task: string
   /** 只交给这个终端的留痕文档（workDir 内，绝对或相对路径） */
   documents?: string[]
+  resumeTermId?: string
+}
+
+export interface ChildApproval {
+  id: string
+  prompt: string
+  options: { value: string; label: string }[]
+}
+
+export interface ChildControlEntry {
+  termId: string
+  cli: CliId
+  profileId?: string
+  profileLabel?: string
+  nativeSessionId?: string
+  taskKind?: TriggerKind
+  live: boolean
+  resumable: boolean
+  resumeDisabledReason?: string
+  runId?: string
+  resultFile?: string
+  approval?: ChildApproval
 }
 
 export interface TriggerResponse {
@@ -245,7 +329,7 @@ export interface TriggerResponse {
   tasks: ChildTargetStatus[]
 }
 
-export type ChildState = 'launching' | 'running' | 'done' | 'failed'
+export type ChildState = 'launching' | 'running' | 'waiting-approval' | 'done' | 'failed'
 
 /** 子任务失败原因：拉起失败 / 任务没投递进输入框 / 进程提前退出 / 超时没出结果 */
 export type ChildFailure = 'launch' | 'delivery' | 'exit' | 'timeout'
@@ -257,7 +341,7 @@ export type RunState = 'active' | 'finished' | 'aborted'
  * wait 继续等 / retry 有失败可重试 / analyze 全部完成去读结果 /
  * report-failure 有失败且不能自动重试 / stop 本次 run 已随主会话结束而作废
  */
-export type RunNextAction = 'wait' | 'retry' | 'analyze' | 'report-failure' | 'stop'
+export type RunNextAction = 'wait' | 'approve' | 'retry' | 'analyze' | 'report-failure' | 'stop'
 
 /** 某个子任务在一次 run 里的对外状态 */
 export interface ChildTargetStatus {
@@ -272,6 +356,7 @@ export interface ChildTargetStatus {
   canRetry: boolean
   termId?: string
   resultFile?: string
+  approval?: ChildApproval
   failure?: ChildFailure
   error?: string
   /** 当前这次拉起已经过去的毫秒数 */
@@ -299,11 +384,14 @@ export interface RetryResponse extends RunSnapshot {
 
 export interface TerminalInfo {
   id: string
+  workspaceSessionId?: string
   role: TerminalRole
   /** 主会话使用的 CLI 档案 */
   profileId?: string
   /** 会话创建时解析好的档案显示名（别名），档案之后被改也不影响在跑的会话 */
   profileLabel?: string
+  /** 会话启动时实际使用的权限模式 id（随会话固定，不随档案后续修改而变） */
+  permissionMode?: string
   /** 子终端的任务类型 */
   taskKind?: TriggerKind
   /** 子终端的序号（1 起） */
@@ -330,6 +418,8 @@ export interface SessionSummary extends TerminalInfo {
   done?: boolean
   /** 会话首条用户消息（从 CLI 自己的 transcript 读回，读到前为空） */
   initialQuery?: string
+  /** CLI 自己给这条会话起的标题（从 transcript 头部读回，生成较晚或不生成的 CLI 为空） */
+  title?: string
   runtime: TerminalRuntimeState
   usage?: TokenUsage
 }
@@ -337,6 +427,9 @@ export interface SessionSummary extends TerminalInfo {
 export interface BridgeInfo {
   port: number
   baseUrl: string
+  appVersion: string
+  appPath: string
+  packaged: boolean
 }
 
 /** 四套 CLI 的 jsonl 归一后的对话条目。 */
@@ -369,6 +462,7 @@ export interface HistoryChild {
 
 /** 跨重启保留的一条主会话；子终端嵌在里面，一起淘汰。 */
 export interface HistoryRecord {
+  workspaceSessionId?: string
   /** 应用自己的 pty id */
   sessionId: string
   /** 该 CLI 的原生 session id，resume 与读 transcript 都靠它 */
@@ -429,7 +523,7 @@ export interface DiscoverReq {
 }
 
 /** 终端右键菜单动作（由主进程原生菜单回填给渲染进程执行） */
-export type TermMenuAction = 'copy' | 'paste' | 'selectAll' | 'clear' | 'zoomIn' | 'zoomOut' | 'addNote'
+export type TermMenuAction = 'copy' | 'paste' | 'selectAll' | 'clear' | 'zoomIn' | 'zoomOut' | 'addNote' | 'saveNote'
 
 export type BuiltinCommandKind = 'design' | 'write' | 'review'
 
@@ -442,6 +536,8 @@ export interface CommandConfig {
   /** 内置正文留空 = 使用默认；自定义命令不可为空 */
   prompt: string
   builtinKind?: BuiltinCommandKind
+  allowChildClis?: boolean
+  childCliIds?: string[]
 }
 
 export type BuiltinInjectionKind = 'present'
@@ -480,6 +576,14 @@ export interface OutputArtifact {
   mtime: number
 }
 
+/** 产物的产生者身份：输出列表第二行按「CLI名 - 模型名」展示 */
+export interface OutputProducer {
+  /** CLI 适配器显示名，如 codebuddy */
+  cliLabel: string
+  /** 会话启动时使用的模型；留空表示该 CLI 的默认模型 */
+  model?: string
+}
+
 export interface OutputBundle {
   id: string
   sessionId: string
@@ -487,6 +591,8 @@ export interface OutputBundle {
   title: string
   createdAt: number
   source: 'main-cli' | 'reviewer'
+  /** 子 CLI 产物取它自己的档案，主 CLI 产物取主会话，都是会话启动时固定的值 */
+  producer: OutputProducer
   artifacts: OutputArtifact[]
 }
 
@@ -496,15 +602,15 @@ export interface OutputBundle {
  */
 export type NoteKind = 'text' | 'file' | 'url'
 
-/** 便签处理状态；todo 未处理（默认）、doing 进行中、done 已完成（列表中默认隐藏） */
-export type NoteStatus = 'todo' | 'doing' | 'done'
+/** 便签处理状态；todo 未处理（默认）、doing 进行中、testing 待测试、done 已完成（列表中默认隐藏） */
+export type NoteStatus = 'todo' | 'doing' | 'testing' | 'done'
 
-export const NOTE_STATUSES: NoteStatus[] = ['todo', 'doing', 'done']
+export const NOTE_STATUSES: NoteStatus[] = ['todo', 'doing', 'testing', 'done']
 
 /** 一条便签；跨重启保留在存储目录（默认 userData/clichilds）下的 notes.json */
 export interface Note {
   id: string
-  /** 归属工作目录；运行窗口的浮窗按它过滤，管理页按它分组 */
+  /** 工作目录或 DEFAULT_NOTES_DIR；管理页按归属分组，与执行目录无关 */
   workDir: string
   kind: NoteKind
   /** kind='text' 是正文；'file' 是文件绝对路径；'url' 是网址 */
@@ -512,6 +618,8 @@ export interface Note {
   /** 展示名：text 默认取正文前 20 字，file 默认取文件名 */
   title: string
   status: NoteStatus
+  order?: number
+  execution?: { workspaceSessionId: string; cli: CliId; profileId: string }
   /** 加入时间（epoch ms） */
   createdAt: number
   updatedAt: number
@@ -592,14 +700,53 @@ export const TITLEBAR_OVERLAY_HEIGHT = TITLEBAR_HEIGHT - 1
 
 /** IPC 通道名（唯一定义处） */
 export const CH = {
+  databaseGetSnapshot: 'database:snapshot',
+  databaseUpdateConfig: 'database:config:update',
+  databaseTest: 'database:test',
+  databaseTables: 'database:tables',
+  databaseTableDetail: 'database:table:detail',
+  databaseSubmitQuery: 'database:query:submit',
+  databaseBrowseTable: 'database:table:browse',
+  databaseDeleteRows: 'database:rows:delete',
+  databaseInspect: 'database:request:inspect',
+  databaseDecide: 'database:request:decide',
+  databaseCancel: 'database:request:cancel',
+  databaseChanged: 'database:changed',
+  databaseResolveScope: 'database:scope:resolve',
+  databasePickFile: 'database:file:pick',
+  sshGetSnapshot: 'ssh:snapshot',
+  sshUpdateConfig: 'ssh:config:update',
+  sshConnect: 'ssh:connect',
+  sshDisconnect: 'ssh:disconnect',
+  sshAuthRespond: 'ssh:auth:respond',
+  sshTrustHostKey: 'ssh:host-key:trust',
+  sshTerminalOpen: 'ssh:terminal:open',
+  sshTerminalClose: 'ssh:terminal:close',
+  sshTerminalWrite: 'ssh:terminal:write',
+  sshTerminalResize: 'ssh:terminal:resize',
+  sshTerminalAttach: 'ssh:terminal:attach',
+  sshTerminalDetach: 'ssh:terminal:detach',
+  sshRequestInspect: 'ssh:request:inspect',
+  sshRequestDecide: 'ssh:request:decide',
+  sshRequestCancel: 'ssh:request:cancel',
+  sshChanged: 'ssh:changed',
+  sshTerminalData: 'ssh:terminal:data',
+  sshTerminalExit: 'ssh:terminal:exit',
+  sshResolveScope: 'ssh:scope:resolve',
+  sshPickIdentity: 'ssh:identity:pick',
   configGet: 'config:get',
   configSet: 'config:set',
+  dataDirectoryGet: 'data-directory:get',
+  dataDirectoryMigrate: 'data-directory:migrate',
   cliDetect: 'cli:detect',
+  cliManage: 'cli:manage',
+  notesReorder: 'notes:reorder',
   /** { cli, model } -> CliTestResult；真实调用一次模型，model 为空 = 测 CLI 默认模型 */
   cliModelTest: 'cli:model-test',
   dirPick: 'dir:pick',
-  pasteImage: 'paste-image', // -> 剪贴板有图片则落盘临时目录，返回 PNG 绝对路径；无图片返回 null
+  pasteFiles: 'paste-files',
   bridgeInfo: 'bridge:info',
+  skillsSync: 'skills:sync',
   sessionStart: 'session:start', // { workDir, profileId, resumeSessionId? } -> { sessionId }
   sessionList: 'session:list', // -> SessionSummary[]（存活的 pty 会话）
   sessionsChanged: 'session:changed', // main -> renderer SessionSummary[]
@@ -611,6 +758,7 @@ export const CH = {
   termWrite: 'term:write', // { id, data }
   termResize: 'term:resize', // { id, cols, rows }
   termKill: 'term:kill', // { id }
+  childResume: 'child:resume',
   termRestart: 'term:restart', // { id } 关闭该子终端并按原参数重开一个（CLI 子任务重新投递同一任务，纯 shell 同类型重建）
   termRetryPrompt: 'term:retry-prompt', // { id }
   termAttach: 'term:attach', // id -> 断连期间的输出，并开始转发实时输出
@@ -626,8 +774,8 @@ export const CH = {
   notesRemove: 'notes:remove',
   notesClear: 'notes:clear',
   notesChanged: 'notes:changed', // main -> renderer Note[]
-  /** 切换便签存储目录：把现有 notes.json 与图片资产迁移过去，并写回配置；返回最新 AppConfig */
-  notesSetStorage: 'notes:set-storage',
+  notesSelection: 'notes:selection',
+  notesCaptureState: 'notes:capture-state',
   /** 解析一条便签要展示的内容（主进程按 noteId 取路径，渲染层不传路径） */
   notesAsset: 'notes:asset',
   /** 剪贴板图片落盘到便签资产目录，返回绝对路径；没有图片返回 null */
@@ -643,8 +791,19 @@ export const CH = {
   outputList: 'output:list',
   outputRead: 'output:read',
   outputAsset: 'output:asset',
+  /** 在系统资源管理器里定位某个产物文件（已删除则退化成打开所在目录） */
+  outputReveal: 'output:reveal',
   outputsChanged: 'output:changed',
   externalOpen: 'external:open',
+  updateState: 'update:state',
+  /** 立即检查一次更新（跳过缓存）；失败会抛错，给手动点击用 */
+  updateCheck: 'update:check',
+  updateDownload: 'update:download',
+  /** 拉起已下载的安装包并退出应用 */
+  updateInstall: 'update:install',
+  /** 用户已经看过这个版本，清掉红点 */
+  updateDismiss: 'update:dismiss',
+  updateChanged: 'update:changed',
   gitBranch: 'git:branch',
   /** 工作目录的变更清单（watcher 触发后由主进程推送，渲染层按 workDir 过滤） */
   gitChanges: 'git:changes',
@@ -665,15 +824,21 @@ export const CH = {
 } as const
 
 /** preload 暴露给渲染进程的 API 面（唯一声明处） */
-export interface ClichildsApi {
+export interface ClichildsApi extends SshHostApi, DatabaseHostApi {
   configGet(): Promise<AppConfig>
   configSet(cfg: AppConfig): Promise<AppConfig>
+  dataDirectoryGet(): Promise<string>
+  dataDirectoryMigrate(payload: { dir: string }): Promise<void>
   cliDetect(): Promise<CliStatus[]>
+  cliManage(req: { cli: CliId; action: 'install' | 'upgrade' }): Promise<CliStatus>
+  notesReorder(req: { workDir: string; ids: string[] }): Promise<void>
   /** 用某个模型跑一次非交互最小测试（真实调用模型，可能耗时较久） */
   cliModelTest(req: { cli: CliId; model: string }): Promise<CliTestResult>
   dirPick(opts?: { create?: boolean }): Promise<string | null>
-  pasteImage(): Promise<string | null>
+  /** 终端粘贴：先取剪贴板文件路径，否则将截图落盘临时目录；无文件和图片时返回空数组 */
+  pasteFiles(): Promise<string[]>
   bridgeInfo(): Promise<BridgeInfo>
+  skillsSync(): Promise<void>
   sessionStart(payload: {
     workDir: string
     profileId: string
@@ -681,6 +846,8 @@ export interface ClichildsApi {
     resumeSessionId?: string
     /** 启动就绪后自动投递的初始提示词（如「用其他 CLI 继续」的交接说明） */
     initialPrompt?: string
+    noteIds?: string[]
+    allowCrossDirNotes?: boolean
   }): Promise<{ sessionId: string }>
   sessionList(): Promise<SessionSummary[]>
   historyList(): Promise<HistoryRecord[]>
@@ -692,6 +859,7 @@ export interface ClichildsApi {
   termKill(id: string): void
   /** 关闭一个子终端并按原参数重开一个；主终端不支持，失败时抛错 */
   termRestart(id: string): Promise<void>
+  childResume(sessionId: string, termId: string): Promise<{ termId: string }>
   termRetryPrompt(id: string): void
   termAttach(id: string): Promise<string>
   termDetach(id: string): void
@@ -709,9 +877,9 @@ export interface ClichildsApi {
   notesRemove(id: string): Promise<void>
   /** 不带 workDir = 清全部（管理页），带上 = 只清该工作目录（浮窗） */
   notesClear(payload?: { workDir?: string }): Promise<void>
-  /** 切换便签存储目录：现有 notes.json 与图片资产一并迁移；返回写回后的最新配置 */
-  notesSetStorage(payload: { dir: string }): Promise<AppConfig>
   onNotesChanged(cb: (list: Note[]) => void): () => void
+  notesSelection(payload: NoteSelectionInput): void
+  onNotesCaptureState(cb: (enabled: boolean) => void): () => void
   /** 解析一条便签要展示的内容；主进程按 noteId 取路径，渲染层不传路径 */
   notesAsset(payload: { noteId: string }): Promise<NoteAssetResult>
   /** 剪贴板图片落盘到便签资产目录，返回绝对路径；没有图片返回 null */
@@ -734,8 +902,21 @@ export interface ClichildsApi {
   }>
   /** Markdown 内嵌图片：以该 md 为基准解析相对路径，越界或非图片直接拒绝 */
   outputAsset(req: { sessionId: string; artifactId: string; src: string }): Promise<{ dataUrl: string }>
+  /** 在资源管理器里选中该产物文件；文件已删除时退化成打开它所在的目录 */
+  outputReveal(req: { sessionId: string; artifactId: string }): Promise<void>
   onOutputsChanged(cb: (p: { sessionId: string; bundles: OutputBundle[] }) => void): () => void
   externalOpen(url: string): Promise<void>
+  /** 当前版本、检测到的新版与下载进度；不开网络 */
+  updateState(): Promise<UpdateState>
+  /** 立即检查更新；受网络影响会抛错，只缓存在主进程内存里 */
+  updateCheck(): Promise<UpdateState>
+  /** 下载最新版安装包；已有下载任务时返回当前进度 */
+  updateDownload(): Promise<UpdateState>
+  /** 安装已下载的安装包：拉起安装程序后立即退出应用 */
+  updateInstall(): Promise<void>
+  /** 记下已经看过的版本，设置入口的红点随之消失 */
+  updateDismiss(version: string): Promise<void>
+  onUpdateChanged(cb: (state: UpdateState) => void): () => void
   /** 在工作目录下执行 git rev-parse --abbrev-ref HEAD，非 git 目录返回 null */
   gitBranch(workDir: string): Promise<string | null>
   /** 工作目录及其子目录的变更文件清单（不含 .gitignore 忽略的文件） */

@@ -37,7 +37,7 @@ jobs:
           fi
 
   windows:
-    name: Windows x64 (NSIS + portable)
+    name: Windows x64 (NSIS)
     needs: validate
     runs-on: windows-latest
     timeout-minutes: 40
@@ -87,7 +87,7 @@ jobs:
       - name: Build Windows packages
         run: npx --no-install electron-builder --win --publish never
 
-      # 只收 release/ 根目录下的 exe（安装版 + 便携版）。
+      # 只收 release/ 根目录下的 setup 安装包。
       # win-unpacked/ 整个解压目录和 .blockmap 都不上传，版本号不能写死。
       - name: Upload Windows packages
         uses: actions/upload-artifact@v4

@@ -3,8 +3,11 @@ import { useEffect, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { OutputArtifact, OutputBundle } from '@shared/types'
+import { ipcErrorText } from '../notes'
 import { useDrawerHeight } from './useDrawerHeight'
 import { useNoteMenu } from './NoteContextMenu'
+import { toast } from './ToastHost'
+import { UrlPreview } from './UrlPreview'
 
 interface PreviewContent {
   media: 'markdown' | 'image' | 'url'
@@ -106,7 +109,7 @@ export function useOutputSession(sessionId: string | null): OutputSession {
   }
 }
 
-/** 状态栏最右侧的输出入口；没有输出文件时不占位 */
+/** 状态栏最右侧的输出入口；没有输出文件时不占位。计数用「图标 + 数字」，与变更入口同口径 */
 export function OutputTrigger({ session }: { session: OutputSession }): JSX.Element | null {
   if (!session.hasOutputs) return null
   const parts: string[] = []
@@ -114,12 +117,83 @@ export function OutputTrigger({ session }: { session: OutputSession }): JSX.Elem
   if (session.urlCount > 0) parts.push(`${session.urlCount} 个网址`)
   return (
     <button
-      className="output-trigger"
-      title="查看 CLI 产出的文档与网址"
+      className="output-trigger status-pill"
+      title={`查看 CLI 产出的${parts.join(' · ')}`}
       onClick={() => session.setOpen(!session.open)}
     >
-      {parts.join(' · ')}
+      {session.docCount > 0 ? (
+        <>
+          <IconDoc />
+          <span className="status-count">{session.docCount}</span>
+        </>
+      ) : null}
+      {session.urlCount > 0 ? (
+        <>
+          {session.docCount > 0 ? <span className="status-sep">·</span> : null}
+          <IconLink />
+          <span className="status-count">{session.urlCount}</span>
+        </>
+      ) : null}
     </button>
+  )
+}
+
+function IconDoc(): JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="13"
+      height="13"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.1"
+      strokeLinejoin="round"
+      strokeLinecap="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M3.5 2.5h6.6l2.4 2.4v8.6H3.5z" />
+      <path d="M10 2.6v2.6h2.5" />
+      <path d="M5.8 7.6h4.4M5.8 10h3" />
+    </svg>
+  )
+}
+
+function IconLink(): JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="13"
+      height="13"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.1"
+      strokeLinecap="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="8" cy="8" r="6.1" strokeWidth="1.1" />
+      <path d="M1.9 8h12.2M8 1.9c1.9 1.9 1.9 10.3 0 12.2M8 1.9c-1.9 1.9-1.9 10.3 0 12.2" strokeWidth="0.9" />
+    </svg>
+  )
+}
+
+function IconFolder(): JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="13"
+      height="13"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.1"
+      strokeLinejoin="round"
+      strokeLinecap="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M2.3 4h3.6l1.3 1.7h6.5v6.4H2.3z" />
+    </svg>
   )
 }
 
@@ -131,6 +205,24 @@ function Empty({ art }: { art: OutputItem }): JSX.Element {
       </p>
     </div>
   )
+}
+
+/** 列表第二行：产生该产物的 CLI 名与模型；模型没配就显示「默认」 */
+function producerLine(bundle: OutputBundle): string {
+  return `${bundle.producer.cliLabel} - ${bundle.producer.model ?? '默认'}`
+}
+
+const TIME_OPTS: Intl.DateTimeFormatOptions = {
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false
+}
+
+/** 该产物发布时间：列表第二行尾部展示，悬停看完整时间 */
+function publishedAt(bundle: OutputBundle): string {
+  return new Date(bundle.createdAt).toLocaleString('zh-CN', TIME_OPTS)
 }
 
 /**
@@ -164,12 +256,15 @@ function OutputRow({
         onClick={() => session.select(artifact.id)}
         title={artifact.path}
       >
-        <span>{artifact.media === 'url' ? '🌐' : artifact.media === 'image' ? '▧' : '≡'} {artifact.label}</span>
-        <small>{bundle.title}</small>
+        <span>
+          {bundle.source === 'reviewer' && <em className="output-src" title="子 CLI 输出">子</em>}
+          {artifact.media === 'url' ? '🌐' : artifact.media === 'image' ? '▧' : '≡'} {artifact.label}
+        </span>
+        <small title={new Date(bundle.createdAt).toLocaleString()}>{producerLine(bundle)} · {publishedAt(bundle)}</small>
       </button>
-      {artifact.media === 'url' && (
+      {artifact.media === 'url' ? (
         <button
-          className="output-url-open"
+          className="output-row-act"
           title="在浏览器中打开"
           onClick={(e) => {
             e.stopPropagation()
@@ -177,6 +272,19 @@ function OutputRow({
           }}
         >
           ↗
+        </button>
+      ) : (
+        <button
+          className="output-row-act"
+          title="打开所属文件夹"
+          onClick={(e) => {
+            e.stopPropagation()
+            void window.clichilds
+              .outputReveal({ sessionId: session.sessionId ?? '', artifactId: artifact.id })
+              .catch((error: unknown) => toast(ipcErrorText(error)))
+          }}
+        >
+          <IconFolder />
         </button>
       )}
       {menu.menu}
@@ -197,11 +305,20 @@ export function OutputDrawer({
   onHeight: (height: number) => void
 }): JSX.Element | null {
   const { height, resize } = useDrawerHeight(savedHeight, 180, 0.7, onHeight)
+  const [query, setQuery] = useState('')
   const previewMenu = useNoteMenu({
     workDir: session.active?.bundle.workDir,
     selectionCopyLabel: '复制选中'
   })
   if (!session.open || !session.active) return null
+
+  const keyword = query.trim().toLowerCase()
+  const visible = keyword
+    ? session.items.filter(({ bundle, artifact }) => {
+        const haystack = `${artifact.label}\n${artifact.path}\n${producerLine(bundle)}`.toLowerCase()
+        return haystack.includes(keyword)
+      })
+    : session.items
 
   return (
     <section className="output-drawer" style={{ height }}>
@@ -216,9 +333,18 @@ export function OutputDrawer({
       </header>
       <div className="output-body">
         <nav className="output-list">
-          {session.items.map(({ bundle, artifact }) => (
+          <div className="output-search">
+            <input
+              type="search"
+              placeholder="搜索输出…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+          {visible.map(({ bundle, artifact }) => (
             <OutputRow key={artifact.id} session={session} bundle={bundle} artifact={artifact} />
           ))}
+          {visible.length === 0 && <p className="hint output-search-empty">没有匹配的输出</p>}
         </nav>
         <article className="output-preview" onContextMenu={previewMenu.onContextMenu}>
           <PreviewContentArea session={session} />
@@ -241,7 +367,7 @@ export function OutputMaxDrawer({ session }: { session: OutputSession }): JSX.El
       <header className="output-head">
         <b>{session.active.artifact.label}</b>
         <span className="hint" title={session.active.artifact.path}>
-          {session.active.bundle.title}
+          {producerLine(session.active.bundle)}
         </span>
         <span className="spacer" />
         <button className="output-min" onClick={() => session.setMaximized(false)} title="收起">
@@ -259,52 +385,75 @@ export function OutputMaxDrawer({ session }: { session: OutputSession }): JSX.El
 function PreviewContentArea({ session }: { session: OutputSession }): JSX.Element {
   const content = session.content
   const active = session.active
+  const [zoom, setZoom] = useState<{ src: string; alt: string } | null>(null)
   if (!content || !active) return <div className="hint" style={{ padding: 24 }}>读取中…</div>
+  const lightbox = zoom ? <ImageZoom src={zoom.src} alt={zoom.alt} onClose={() => setZoom(null)} /> : null
 
   if (content.media === 'url') {
     const url = content.text ?? active.artifact.path
     if (!url) return <Empty art={active} />
-    if (/^(https?:\/\/)/.test(url)) {
-      return (
-        <div className="output-url-frame">
-          <iframe
-            src={url}
-            title={active.artifact.label}
-            sandbox="allow-scripts allow-forms allow-popups"
-            referrerPolicy="no-referrer"
-            onError={() => null}
-          />
-          <div className="output-url-bar">
-            <span className="hint" title={url}>{url}</span>
-          </div>
-        </div>
-      )
-    }
-    return <Empty art={active} />
+    return <UrlPreview url={url} title={active.artifact.label} />
   }
 
   if (content.media === 'image' && content.dataUrl) {
-    return <img src={content.dataUrl} alt={active.artifact.label} />
+    const src = content.dataUrl
+    return (
+      <>
+        <img
+          className="output-zoomable"
+          src={src}
+          alt={active.artifact.label}
+          title="点击放大"
+          onClick={() => setZoom({ src, alt: active.artifact.label })}
+        />
+        {lightbox}
+      </>
+    )
   }
 
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      skipHtml
-      components={{
-        a: ({ href, children }) => (
-          <a href={href} onClick={(e) => {
-            e.preventDefault()
-            if (href && /^https?:\/\//i.test(href)) void window.clichilds.externalOpen(href)
-          }}>{children}</a>
-        ),
-        img: ({ src, alt }) => (
-          <MdImage sessionId={session.sessionId ?? ''} artifactId={active.artifact.id} src={src} alt={alt} />
-        )
-      }}
-    >
-      {content.text ?? '读取中…'}
-    </ReactMarkdown>
+    <>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        skipHtml
+        components={{
+          a: ({ href, children }) => (
+            <a href={href} onClick={(e) => {
+              e.preventDefault()
+              if (href && /^https?:\/\//i.test(href)) void window.clichilds.externalOpen(href)
+            }}>{children}</a>
+          ),
+          img: ({ src, alt }) => (
+            <MdImage
+              sessionId={session.sessionId ?? ''}
+              artifactId={active.artifact.id}
+              src={src}
+              alt={alt}
+              onZoom={(url) => setZoom({ src: url, alt: alt ?? active.artifact.label })}
+            />
+          )
+        }}
+      >
+        {content.text ?? '读取中…'}
+      </ReactMarkdown>
+      {lightbox}
+    </>
+  )
+}
+
+/** 点开的图片：覆盖整窗，点任意处或按 Esc 关闭 */
+function ImageZoom({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }): JSX.Element {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return (
+    <div className="image-zoom" title="点击任意处关闭" onClick={onClose}>
+      <img src={src} alt={alt} />
+    </div>
   )
 }
 
@@ -314,6 +463,7 @@ function MdImage(props: {
   artifactId: string
   src?: string
   alt?: string
+  onZoom: (url: string) => void
 }): JSX.Element {
   const [state, setState] = useState<{ url?: string; error?: string }>({})
   useEffect(() => {
@@ -333,7 +483,18 @@ function MdImage(props: {
       })
     return () => { alive = false }
   }, [props.sessionId, props.artifactId, props.src])
-  if (state.url) return <img src={state.url} alt={props.alt ?? ''} />
+  if (state.url) {
+    const url = state.url
+    return (
+      <img
+        className="output-zoomable"
+        src={url}
+        alt={props.alt ?? ''}
+        title="点击放大"
+        onClick={() => props.onZoom(url)}
+      />
+    )
+  }
   return (
     <span className="md-image-hint">
       [图片：{props.alt || props.src || '未知'}{state.error ? ` · ${state.error}` : ' 解析中…'}]

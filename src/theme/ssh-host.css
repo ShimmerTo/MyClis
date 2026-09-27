@@ -1,0 +1,104 @@
+.shell-nav .has-dot {
+  position: relative;
+}
+
+/* 有新版本：右上角一个小红点，不占布局宽度、不带文字 */
+.shell-nav-dot {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger, #d94a4a);
+}
+
+.shell-nav .has-badge {
+  position: relative;
+  padding-right: 64px;
+}
+
+.shell-nav-badge {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.wb-main {
+  position: relative;
+}
+
+.approval-slot {
+  position: absolute;
+  z-index: 20;
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  max-height: calc(100% - 24px);
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.approval-slot > * {
+  pointer-events: auto;
+}
+
+/* SSH 待办图标：卡片右上角那几枚，0 条不渲染 */
+.ssh-badge,
+.wb-tab-approval {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 18px;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--warn);
+  -webkit-app-region: no-drag;
+}
+
+.ssh-badge:hover,
+.wb-tab-approval:hover {
+  background: var(--bg-hover);
+  border: 0;
+}
+
+.ssh-badge-count {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.ssh-card-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+/* 右侧栏兜底：认不到会话的 SSH 待办与问题出口 */
+.ssh-rail-todo {
+  flex: 0 0 auto;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--warn);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}

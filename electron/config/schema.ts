@@ -1,7 +1,10 @@
 import {
   CHILD_TIMEOUT_MAX_MINUTES,
   CHILD_TIMEOUT_MIN_MINUTES,
-  DEFAULT_CHILD_TIMEOUT_MINUTES
+  DEFAULT_CHILD_TIMEOUT_MINUTES,
+  DEFAULT_POLL_INTERVAL_MINUTES,
+  POLL_INTERVAL_MIN_MINUTES,
+  POLL_INTERVAL_MAX_MINUTES
 } from '../../shared/types'
 import type {
   AppConfig,
@@ -12,7 +15,6 @@ import type {
   LaunchConfig,
   SkillPrompts
 } from '../../shared/types'
-import { isAbsolute } from 'path'
 import { DEFAULT_COMMANDS, DEFAULT_INJECTIONS } from '../../shared/skillPrompts'
 
 /** 可配置模型清单的 CLI 类型（也是 CliModelLists 的全部键） */
@@ -39,7 +41,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   commands: structuredClone(DEFAULT_COMMANDS),
   injections: structuredClone(DEFAULT_INJECTIONS),
-  review: { childTimeoutMinutes: DEFAULT_CHILD_TIMEOUT_MINUTES },
+  review: { childTimeoutMinutes: DEFAULT_CHILD_TIMEOUT_MINUTES, pollIntervalMinutes: DEFAULT_POLL_INTERVAL_MINUTES },
   theme: 'dark',
   ui: {
     reviewerLayout: 'vertical',
@@ -52,8 +54,9 @@ export const DEFAULT_CONFIG: AppConfig = {
     diffMode: 'unified',
     statusBarMode: 'always'
   },
-  notes: { storageDir: '', panelMode: 'pinned' },
+  notes: { panelMode: 'pinned', selectionCaptureEnabled: false },
   notifications: { cliIdle: true },
+  update: { autoDownload: false, lastDismissedVersion: '' },
   closeToTray: true
 }
 
@@ -124,8 +127,19 @@ export function validateAppConfig(cfg: AppConfig): string[] {
     if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(name)) {
       errors.push(`命令名无效：${command.name || '（空）'}；只能使用小写字母、数字和连字符`)
     }
+    if (name.toLowerCase() === 'myclis-db') errors.push('myclis-db 是 Database 保留命令名')
     if (commandNames.has(name.toLowerCase())) errors.push(`命令名重复：${name}`)
     commandNames.add(name.toLowerCase())
+    if (!command.builtinKind) {
+      if (command.allowChildClis !== undefined && typeof command.allowChildClis !== 'boolean') {
+        errors.push(`命令 ${name} 的自主调用开关无效`)
+      }
+      if (command.childCliIds !== undefined && !Array.isArray(command.childCliIds)) {
+        errors.push(`命令 ${name} 的子 CLI 选择无效`)
+      } else {
+        checkRefs(command.childCliIds ?? [], `命令 ${name}`)
+      }
+    }
     if (typeof command.prompt !== 'string') errors.push(`命令 ${name} 的提示词必须是字符串`)
     else {
       if (command.prompt.length > 8000) errors.push(`命令 ${name} 的提示词过长（上限 8000 字符）`)
@@ -168,6 +182,11 @@ export function validateAppConfig(cfg: AppConfig): string[] {
     )
   }
 
+  const interval = cfg.review?.pollIntervalMinutes
+  if (!Number.isInteger(interval) || interval < POLL_INTERVAL_MIN_MINUTES || interval > POLL_INTERVAL_MAX_MINUTES) {
+    errors.push(`主 CLI 轮询间隔需为 ${POLL_INTERVAL_MIN_MINUTES} ~ ${POLL_INTERVAL_MAX_MINUTES} 分钟的整数`)
+  }
+
   if (cfg.ui?.reviewerLayout === 'tile' && cfg.ui?.tileWidthMode === 'fixed') {
     const w = cfg.ui.tileWidth
     if (!Number.isFinite(w) || w < 240 || w > 1600) errors.push('平铺固定宽度需在 240 ~ 1600 px 之间')
@@ -181,13 +200,12 @@ export function validateAppConfig(cfg: AppConfig): string[] {
     if (!Number.isFinite(value) || value < 120 || value > 2000) errors.push(`${label}需在 120 ~ 2000 px 之间`)
   }
 
-  // 便签存储目录要么留空（用默认位置），要么必须是绝对路径 —— 相对路径会跟着进程 cwd 漂移
-  if (cfg.notes?.storageDir && !isAbsolute(cfg.notes.storageDir)) {
-    errors.push('便签存储目录必须是绝对路径')
-  }
   if (cfg.notes?.panelMode !== 'pinned' && cfg.notes?.panelMode !== 'blur') {
     errors.push('便签浮窗行为无效')
   }
+  if (typeof cfg.notes?.selectionCaptureEnabled !== 'boolean') errors.push('全局便签收集开关无效')
+  if (typeof cfg.update?.autoDownload !== 'boolean') errors.push('自动下载更新开关无效')
+  if (typeof cfg.update?.lastDismissedVersion !== 'string') errors.push('已读版本号无效')
   return errors
 }
 
@@ -271,7 +289,7 @@ export function mergeConfig(raw: LegacyConfig | null): AppConfig {
       id: builtin.id,
       builtinKind: builtin.builtinKind,
       name: String(saved?.name || builtin.name).replace(/^\//, '').trim(),
-      prompt: String(saved?.prompt ?? legacy ?? '').replace(/\{resultDir\}/g, '.clichilds/results'),
+      prompt: String(saved?.prompt ?? legacy ?? '').replace(/\{resultDir\}/g, '<本会话目录>/results'),
       enabled: typeof saved?.enabled === 'boolean' ? saved.enabled : true
     })
   }
@@ -281,7 +299,10 @@ export function mergeConfig(raw: LegacyConfig | null): AppConfig {
       id: String(item.id || ''),
       name: String(item.name || '').replace(/^\//, '').trim(),
       enabled: item.enabled !== false,
-      prompt: String(item.prompt || '').replace(/\{resultDir\}/g, '.clichilds/results')
+      prompt: String(item.prompt || '').replace(/\{resultDir\}/g, '<本会话目录>/results'),
+      allowChildClis: item.allowChildClis === true,
+      childCliIds: [...new Set(Array.isArray(item.childCliIds) ? item.childCliIds : [])]
+        .filter((id) => typeof id === 'string' && validIds.has(id))
     })
   }
   const incomingInjections = Array.isArray(raw.injections) ? raw.injections : []
@@ -304,7 +325,12 @@ export function mergeConfig(raw: LegacyConfig | null): AppConfig {
     launch,
     commands,
     injections,
-    review: { childTimeoutMinutes: childTimeoutMinutes(raw.review?.childTimeoutMinutes) },
+    review: {
+      childTimeoutMinutes: childTimeoutMinutes(raw.review?.childTimeoutMinutes),
+      pollIntervalMinutes: typeof raw.review?.pollIntervalMinutes === 'number' && Number.isFinite(raw.review.pollIntervalMinutes)
+        ? Math.round(Math.min(POLL_INTERVAL_MAX_MINUTES, Math.max(POLL_INTERVAL_MIN_MINUTES, raw.review.pollIntervalMinutes)))
+        : DEFAULT_POLL_INTERVAL_MINUTES
+    },
     theme: raw.theme ?? DEFAULT_CONFIG.theme,
     ui: {
       ...DEFAULT_CONFIG.ui,
@@ -317,14 +343,17 @@ export function mergeConfig(raw: LegacyConfig | null): AppConfig {
         raw.ui?.statusBarMode === 'hidden' || raw.ui?.statusBarMode === 'hover' ? raw.ui.statusBarMode : 'always'
     },
     notes: {
-      // 旧配置没有这个字段：空 = 沿用默认存储位置；浮窗行为缺省常驻（与旧行为一致）
-      storageDir: typeof raw.notes?.storageDir === 'string' ? raw.notes.storageDir.trim() : '',
-      panelMode: raw.notes?.panelMode === 'blur' ? 'blur' : 'pinned'
+      panelMode: raw.notes?.panelMode === 'blur' ? 'blur' : 'pinned',
+      selectionCaptureEnabled: raw.notes?.selectionCaptureEnabled === true
     },
     notifications: {
       ...DEFAULT_CONFIG.notifications,
       ...(raw.notifications ?? {}),
       cliIdle: raw.notifications?.cliIdle !== false
+    },
+    update: {
+      autoDownload: raw.update?.autoDownload === true,
+      lastDismissedVersion: typeof raw.update?.lastDismissedVersion === 'string' ? raw.update.lastDismissedVersion : ''
     },
     // 缺省 = 隐藏到托盘（与旧行为一致）；显式 false 才直接退出
     closeToTray: raw.closeToTray !== false

@@ -1,9 +1,12 @@
 import { existsSync, mkdirSync, statSync } from 'fs'
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'path'
-import { MAX_CHILD_RETRIES } from '../../shared/types'
+import { MAX_CHILD_RETRIES, POLL_INTERVAL_MIN_MINUTES, POLL_INTERVAL_MAX_MINUTES } from '../../shared/types'
 import type {
   ChildFailure,
+  ChildControlEntry,
+  HistoryChild,
   CliConfig,
+  OutputProducer,
   RetryResponse,
   RunSnapshot,
   TerminalInfo,
@@ -13,11 +16,13 @@ import type {
   TriggerTarget
 } from '../../shared/types'
 import { permissionLabelOf, profileLabel } from '../../shared/profile'
+import { latestHistoryChildren } from '../../shared/children'
 import { getCliBin } from '../cli/detect'
 import { buildLaunch } from '../cli/launch'
 import { getAdapter } from '../cli/registry'
 import { loadConfig } from '../config/store'
 import { PROMPT_LEAD, removePromptFile, writePromptFile } from '../prompts/promptFile'
+import { ensureSessionWorkspace } from '../sessions/workspace'
 import { toShellLine } from '../util'
 import { bridgePort } from '../bridge/server'
 import type { TerminalManager } from '../pty/terminals'
@@ -26,9 +31,6 @@ import type { OutputStore } from '../outputs/store'
 import { abortRun, canRetry, hasWaiter, markTarget, newRun, nextAction, snapshot, trackRun, waitForChange } from './runs'
 import type { ChildSpec, RunRecord, TargetRecord, WaitEnd } from './runs'
 
-/** /wait 的默认与最长挂起时长：一次调用 = 一次「看一眼」，出现变化立即返回 */
-const DEFAULT_WAIT_MS = 30_000
-const MAX_WAIT_MS = 30_000
 /** 子任务状态变化后唤醒主 CLI 的最短间隔（毫秒） */
 const NUDGE_COOLDOWN_MS = 60_000
 
@@ -47,6 +49,7 @@ export class ReviewRunner {
   private watching = new Map<string, NodeJS.Timeout>()
   /** runId -> 上次提醒主 CLI 的时刻 */
   private nudgedAt = new Map<string, number>()
+  private resuming = new Set<string>()
 
   constructor(
     private manager: TerminalManager,
@@ -69,22 +72,143 @@ export class ReviewRunner {
     })
   }
 
+  /** 历史换绑之后同步迁移台账和原 spec 对象；异步启动、结果回调及重试都读取同一归属。 */
+  reparentChildren(oldId: string, newId: string, workspaceSessionId: string): void {
+    for (const run of this.runs.values()) {
+      if (run.mainTermId !== oldId) continue
+      run.mainTermId = newId
+      for (const target of run.targets.values()) target.spec.parentTermId = newId
+      // 已作废的 run 仍作废，不能因 resume 自动重启旧任务。
+      this.nudgedAt.delete(run.runId)
+    }
+    this.manager.reparentChildren(oldId, newId, workspaceSessionId)
+  }
+
+  children(sessionId: string): ChildControlEntry[] {
+    if (!this.manager.mainById(sessionId)) throw new Error('主会话已结束，请使用当前会话标识')
+    return latestHistoryChildren(this.history.find(sessionId)?.children ?? []).map((child) => {
+      const live = this.manager.get(child.termId)
+      const link = this.termIndex.get(child.termId)
+      let resumeDisabledReason: string | undefined
+      try { this.resumeContext(sessionId, child.termId) } catch (error) {
+        resumeDisabledReason = error instanceof Error ? error.message : '无法恢复此子会话'
+      }
+      return {
+        termId: child.termId, cli: child.cli, profileId: child.profileId,
+        profileLabel: child.profileLabel, nativeSessionId: child.nativeSessionId,
+        taskKind: child.taskKind, live: !!live, resumable: !resumeDisabledReason,
+        resumeDisabledReason, runId: link?.runId, resultFile: child.resultFile,
+        approval: this.manager.runtimeOf(child.termId)?.approval
+      }
+    })
+  }
+
+  chooseApproval(sessionId: string, termId: string, approvalId: string, option: string): void {
+    this.manager.chooseApproval(sessionId, termId, approvalId, option)
+    const link = this.termIndex.get(termId)
+    const run = link ? this.runs.get(link.runId) : undefined
+    const target = link ? run?.targets.get(link.profileId) : undefined
+    if (!run || !target || target.state !== 'waiting-approval') return
+    target.approvalWaitMs = (target.approvalWaitMs ?? 0) + Date.now() - (target.approvalSince ?? Date.now())
+    target.approvalSince = undefined
+    markTarget(run, target, 'running')
+  }
+
+  private resumeContext(sessionId: string, termId: string): { main: TerminalInfo; child: HistoryChild; profile: CliConfig; key: string } {
+    const main = this.manager.mainById(sessionId)
+    if (!main) throw new Error('主会话已结束，请使用当前会话标识')
+    const child = this.history.find(sessionId)?.children.find((item) => item.termId === termId)
+    if (!child) throw new Error('此历史子 CLI 不属于当前主会话')
+    if (!child.nativeSessionId) throw new Error('尚未记录原生会话标识，无法继续原对话')
+    const profile = loadConfig().cliConfigs.find((item) => item.id === child.profileId && item.cli === child.cli)
+    if (!profile) throw new Error('原 CLI 设置已删除或类型已变更，无法继续原对话')
+    if (!getAdapter(child.cli)?.resumeArgs) throw new Error('此 CLI 不支持恢复原对话')
+    const key = `${child.cli}|${child.nativeSessionId}`
+    if (this.resuming.has(key)) throw new Error('此子 CLI 正在恢复，请勿重复下发')
+    const live = this.manager.sessions().find((item) => item.cli === child.cli && item.nativeSessionId === child.nativeSessionId)
+    if (live && (live.role !== 'child' || live.parentTermId !== sessionId ||
+      (!live.done && live.runtime.phase !== 'ready') || live.runtime.approval)) {
+      throw new Error('此原生会话仍在运行或等待审批，请先处理当前任务')
+    }
+    return { main, child, profile, key }
+  }
+
+  async resumeChild(sessionId: string, termId: string): Promise<{ termId: string }> {
+    const known = this.history.find(sessionId)?.children.find((item) => item.termId === termId)
+    const existing = this.manager.sessions().find((item) => item.role === 'child' && item.parentTermId === sessionId &&
+      (item.id === termId || (!!known?.nativeSessionId && item.cli === known.cli && item.nativeSessionId === known.nativeSessionId)))
+    if (this.manager.mainById(sessionId) && existing) return { termId: existing.id }
+    const context = this.resumeContext(sessionId, termId)
+    const { main, child, profile, key } = context
+    const live = this.manager.sessions().find((item) => item.cli === child.cli && item.nativeSessionId === child.nativeSessionId)
+    if (live) return { termId: live.id }
+    this.resuming.add(key)
+    try {
+      const adapter = getAdapter(child.cli)!
+      const bin = await getCliBin(child.cli)
+      if (!this.manager.mainById(sessionId)) throw new Error('主会话已结束，取消恢复子 CLI')
+      if (!bin) throw new Error(`未检测到可用的 ${adapter.label}`)
+      if (this.manager.sessions().some((item) => item.cli === child.cli && item.nativeSessionId === child.nativeSessionId)) {
+        throw new Error('原生子会话已在其它终端启动，取消重复恢复')
+      }
+      const launch = buildLaunch(adapter, bin, profile.model ?? '', profile.permissionMode, child.nativeSessionId)
+      const info = await this.manager.create({
+        role: 'child', cli: child.cli, profileId: profile.id, label: this.labelOf(profile),
+        permissionMode: profile.permissionMode, model: profile.model,
+        workDir: main.workDir, shell: main.shell, parentTermId: sessionId,
+        workspaceSessionId: main.workspaceSessionId ?? main.id,
+        taskKind: child.taskKind, index: child.index, nativeSessionId: launch.nativeSessionId,
+        initialCommand: toShellLine(launch.args, main.shell), concealBoot: true,
+        handshake: adapter.startupHandshake, delivery: adapter.delivery
+      })
+      this.history.recordChild(sessionId, {
+        termId: info.id, cli: child.cli, profileId: profile.id, profileLabel: info.profileLabel,
+        nativeSessionId: info.nativeSessionId, model: info.model, taskKind: child.taskKind,
+        index: child.index, startedAt: Date.now()
+      })
+      return { termId: info.id }
+    } finally {
+      this.resuming.delete(key)
+    }
+  }
+
   /** 校验主 CLI 交付的文档，按 targets（可为任意非空子集）拉起子终端。 */
   async run(kind: TriggerKind, request: TriggerRequest): Promise<TriggerResponse> {
     const workDir = resolve(request.workDir.trim())
-    const context = this.manager.taskContext(workDir, kind, request.session)
+    const context = this.manager.taskContext(workDir, kind, request.session, request.commandId)
     if (!context) throw new Error(`未找到工作目录对应的主 CLI 会话：${workDir}`)
+    if (kind === 'custom') {
+      if (!request.targets?.length || request.targets.some((target) => !target.task?.trim())) {
+        throw new Error('自定义命令必须提供非空 targets 和任务指令')
+      }
+      assignTargets(context.profiles, request.targets)
+    }
     if (resolve(context.main.workDir).toLowerCase() !== workDir.toLowerCase()) {
       throw new Error('任务工作目录与指定主会话不一致，请使用该主会话的工作目录')
     }
-    if (context.profiles.length === 0) throw new Error('当前主会话未配置此类子任务')
+    const resumptions = new Map<string, ReturnType<ReviewRunner['resumeContext']>>()
+    const profiles = [...context.profiles]
+    for (const target of request.targets ?? []) {
+      if (!target.resumeTermId) continue
+      if (!request.session) throw new Error('继续历史子 CLI 必须指定当前主会话 session')
+      const resume = this.resumeContext(context.main.id, target.resumeTermId)
+      if (resume.profile.id !== target.profileId) throw new Error('历史子 CLI 与指定的 profileId 不一致')
+      resumptions.set(target.profileId, resume)
+      const index = profiles.findIndex((profile) => profile.id === target.profileId)
+      if (kind === 'custom' && profiles[index].cli !== resume.profile.cli) {
+        throw new Error('历史子 CLI 类型与自定义命令的会话分配不一致，请重新启动主会话')
+      }
+      if (index < 0) profiles.push(resume.profile)
+      else if (kind !== 'custom') profiles[index] = resume.profile
+    }
+    if (profiles.length === 0) throw new Error('当前主会话未配置此类子任务')
 
     const documentPath = resolveDocument(workDir, request.documentPath)
-    // 先全量校验再拉起：错误原文会经 curl 回到主 CLI，它改完重发即可，不会留下半个子终端。
-    const selected = assignTargets(context.profiles, request.targets)
+    // 全量校验在锁定和启动之前，避免错误请求留下半批任务。
+    const selected = assignTargets(profiles, request.targets)
     const taskName = sanitizeSegment(
       basename(documentPath, extname(documentPath)).replace(
-        /[-_ ]?(?:方案设计文档|代码开发任务|代码检查文档)(?:[-_ ]?总览)?$/u,
+        /[-_ ]?(?:方案设计文档|代码开发任务|代码检查文档|自定义命令任务)(?:[-_ ]?总览)?$/u,
         ''
       )
     )
@@ -103,7 +227,8 @@ export class ReviewRunner {
         query: request.query,
         documentPath,
         ownDocs: (selected.byId.get(profile.id)?.documents ?? []).map((p) => resolveDocument(workDir, p)),
-        task: selected.byId.get(profile.id)?.task
+        task: selected.byId.get(profile.id)?.task,
+        resumeSessionId: resumptions.get(profile.id)?.child.nativeSessionId
       }
       order.push(profile.id)
       targets.set(profile.id, {
@@ -111,6 +236,7 @@ export class ReviewRunner {
         label: this.labelOf(profile),
         index: i + 1,
         spec,
+        producer: producerOf(profile),
         state: 'launching',
         launches: 1,
         startedAt: Date.now()
@@ -119,7 +245,12 @@ export class ReviewRunner {
 
     const run = newRun({ kind, workDir, mainTermId: context.main.id, order, targets })
     trackRun(this.runs, run)
-    await Promise.all(selected.profiles.map((profile) => this.launchInto(run, targets.get(profile.id)!, profile)))
+    for (const resume of resumptions.values()) this.resuming.add(resume.key)
+    try {
+      await Promise.all(selected.profiles.map((profile) => this.launchInto(run, targets.get(profile.id)!, profile, true)))
+    } finally {
+      for (const resume of resumptions.values()) this.resuming.delete(resume.key)
+    }
 
     const snap = snapshot(run)
     return {
@@ -139,7 +270,7 @@ export class ReviewRunner {
     return run ? snapshot(run) : null
   }
 
-  /** 阻塞等待：状态有变化立刻返回，否则最多挂起 30 秒（一次调用 = 主 CLI 看一眼） */
+  /** 无变化时按配置挂起，完成、失败或审批仍立即返回。 */
   async wait(runId: string, timeoutMs: number, signal: AbortSignal): Promise<RunSnapshot | null> {
     const run = this.runs.get(runId)
     if (!run) return null
@@ -219,7 +350,20 @@ export class ReviewRunner {
    */
   async restart(id: string): Promise<void> {
     const link = this.termIndex.get(id)
-    if (!link) throw new Error('这个终端不是本应用拉起的子任务，无法重开')
+    if (!link) {
+      const info = this.manager.get(id)
+      const parentId = info?.parentTermId
+      const child = parentId ? this.history.find(parentId)?.children.find((item) => item.termId === id) : undefined
+      if (!parentId || !child?.nativeSessionId || !this.manager.mainById(parentId)) {
+        throw new Error('此子终端没有可恢复的原生会话，无法重开')
+      }
+      if (!loadConfig().cliConfigs.some((profile) => profile.id === child.profileId && profile.cli === child.cli)) {
+        throw new Error('原 CLI 设置已删除或类型已变更，无法重开')
+      }
+      this.manager.kill(id)
+      await this.resumeChild(parentId, id)
+      return
+    }
     const run = this.runs.get(link.runId)
     const target = run?.targets.get(link.profileId)
     if (!run || !target) throw new Error('这个终端所属的子任务已经不在台账里，无法重开')
@@ -237,9 +381,17 @@ export class ReviewRunner {
    * 成功则登记 termIndex、起结果文件监听；失败只写进台账（failure=launch），
    * 不抛给调用方 —— 一个目标拉不起来不该影响整批。
    */
-  private async launchInto(run: RunRecord, target: TargetRecord, profile: CliConfig): Promise<boolean> {
+  private async launchInto(run: RunRecord, target: TargetRecord, profile: CliConfig, resumeReserved = false): Promise<boolean> {
     if (run.abortedAt || !this.manager.get(run.mainTermId)) return false
+    const key = target.spec.resumeSessionId ? `${profile.cli}|${target.spec.resumeSessionId}` : undefined
+    if (key && !resumeReserved && this.resuming.has(key)) {
+      this.failTarget(run, target, 'launch', '此子 CLI 正在恢复，请勿重复下发')
+      return false
+    }
+    if (key && !resumeReserved) this.resuming.add(key)
     target.submissionUncertain = false
+    target.approvalSince = undefined
+    target.approvalWaitMs = 0
     const previous = target.termId
     if (previous) {
       this.termIndex.delete(previous)
@@ -255,6 +407,7 @@ export class ReviewRunner {
       }
       target.termId = info.id
       target.resultFile = resultFile
+      target.producer = producerOf(profile)
       this.termIndex.set(info.id, { runId: run.runId, profileId: target.profileId })
       markTarget(run, target, 'running', { failure: undefined, error: undefined })
       this.watchTarget(run, target)
@@ -262,6 +415,8 @@ export class ReviewRunner {
     } catch (error) {
       this.failTarget(run, target, 'launch', error instanceof Error ? error.message : String(error))
       return false
+    } finally {
+      if (key && !resumeReserved) this.resuming.delete(key)
     }
   }
 
@@ -275,6 +430,16 @@ export class ReviewRunner {
     const bin = await getCliBin(profile.cli)
     if (!this.manager.get(spec.parentTermId)) throw new Error('主会话已结束，取消启动子任务')
     if (!bin) throw new Error(`未检测到可用的 ${adapter.label}`)
+    if (spec.resumeSessionId) {
+      const live = this.manager.sessions().find((item) => item.cli === profile.cli && item.nativeSessionId === spec.resumeSessionId)
+      if (live) {
+        if (live.role !== 'child' || live.parentTermId !== spec.parentTermId ||
+          (!live.done && live.runtime.phase !== 'ready') || live.runtime.approval) {
+          throw new Error('原生子会话仍在运行，取消重复启动')
+        }
+        this.manager.kill(live.id)
+      }
+    }
     const label = this.labelOf(profile)
     const resultFile = this.resultPath(spec, label)
     const prompt = childPrompt(
@@ -286,36 +451,40 @@ export class ReviewRunner {
       resultFile
     )
     // 层1 投递：正文写进工作目录内的临时文件，命令行只带引导语和相对路径
-    const promptFile = adapter.delivery?.initialPromptArgs ? writePromptFile(spec.workDir, prompt) : undefined
+    const main = this.manager.mainById(spec.parentTermId)!
+    const workspaceSessionId = main.workspaceSessionId ?? main.id
+    const promptFile = adapter.delivery?.initialPromptArgs ? writePromptFile(spec.workDir, prompt, workspaceSessionId) : undefined
     const launch = buildLaunch(
       adapter,
       bin,
       profile.model ?? '',
       profile.permissionMode,
-      undefined,
+      spec.resumeSessionId,
       undefined,
       promptFile ? { file: promptFile.rel, lead: PROMPT_LEAD } : undefined
     )
     let info
     try {
-      info = this.manager.create({
-      role: 'child',
-      profileId: profile.id,
-      label,
-      taskKind: spec.kind,
-      index: spec.index,
-      cli: profile.cli,
-      model: profile.model,
-      workDir: spec.workDir,
-      shell: spec.shell,
-      initialCommand: toShellLine(launch.args, spec.shell),
-      concealBoot: true,
-      nativeSessionId: launch.nativeSessionId,
-      parentTermId: spec.parentTermId,
-      autoPrompt: prompt,
-      handshake: adapter.startupHandshake,
-      delivery: adapter.delivery,
-      promptFile: promptFile?.abs
+      info = await this.manager.create({
+        role: 'child',
+        profileId: profile.id,
+        permissionMode: profile.permissionMode,
+        label,
+        taskKind: spec.kind,
+        index: spec.index,
+        cli: profile.cli,
+        model: profile.model,
+        workDir: spec.workDir,
+        shell: spec.shell,
+        initialCommand: toShellLine(launch.args, spec.shell),
+        concealBoot: true,
+        nativeSessionId: launch.nativeSessionId,
+        parentTermId: spec.parentTermId,
+        workspaceSessionId,
+        autoPrompt: prompt,
+        handshake: adapter.startupHandshake,
+        delivery: adapter.delivery,
+        promptFile: promptFile?.abs
       })
     } catch (error) {
       // 子终端没拉起来时临时文件不能留在用户仓库里
@@ -340,9 +509,11 @@ export class ReviewRunner {
 
   /** 本次任务的结果文件路径：任务名 + 类型 + 时间戳 + 档案名 + 序号 */
   private resultPath(spec: ChildSpec, label: string): string {
-    const resultsDir = join(spec.workDir, '.clichilds', 'results')
+    const main = this.manager.mainById(spec.parentTermId)
+    if (!main) throw new Error('主会话已结束')
+    const resultsDir = join(ensureSessionWorkspace(spec.workDir, main.workspaceSessionId ?? main.id), 'results')
     mkdirSync(resultsDir, { recursive: true })
-    const resultLabel = spec.kind === 'design' ? '方案校验' : spec.kind === 'write' ? '代码编写' : '代码检查'
+    const resultLabel = { design: '方案校验', write: '代码编写', review: '代码检查', custom: '自定义命令' }[spec.kind]
     return join(
       resultsDir,
       `${spec.taskName}-${resultLabel}-${timestamp()}-${sanitizeSegment(label)}-${spec.index}.md`
@@ -385,11 +556,25 @@ export class ReviewRunner {
       }
       const runtime = this.manager.runtimeOf(termId)
       target.submissionUncertain = !!runtime?.submissionUncertain
+      if (runtime?.approval) {
+        target.approvalSince ??= Date.now()
+        if (target.approval?.id !== runtime.approval.id) {
+          target.approval = runtime.approval
+          markTarget(run, target, 'waiting-approval')
+          this.nudgeMain(run)
+        }
+        return
+      }
+      if (target.state === 'waiting-approval') {
+        target.approvalWaitMs = (target.approvalWaitMs ?? 0) + Date.now() - (target.approvalSince ?? Date.now())
+        target.approvalSince = undefined
+        markTarget(run, target, 'running')
+      }
       if (runtime?.phase === 'error') {
         this.failTarget(run, target, 'delivery', runtime.message ?? '任务没能投递进 CLI 输入框')
         return
       }
-      const elapsed = Date.now() - target.startedAt
+      const elapsed = Date.now() - target.startedAt - (target.approvalWaitMs ?? 0)
       if (elapsed > this.timeoutMs()) {
         this.failTarget(
           run,
@@ -418,13 +603,15 @@ export class ReviewRunner {
     this.history.recordDone(termId, resultFile)
     markTarget(run, target, 'done', { resultFile, failure: undefined, error: undefined })
     if (target.spec.parentTermId) {
-      const label = target.label
+      // 产物名统一成「任务名 结果类型+序号」：结果文件名带时间戳与 CLI 名，不适合直接展示
+      const label = `${target.spec.taskName} ${OUTPUT_RESULT_NAME[target.spec.kind]}${target.index}`
       try {
-        this.outputs?.publishReviewer(
-          target.spec.parentTermId,
-          `${label} · ${target.spec.kind}结果`,
-          resultFile
-        )
+        this.outputs?.publishReviewer(target.spec.parentTermId, {
+          title: label,
+          file: resultFile,
+          label,
+          producer: target.producer
+        })
       } catch (error) {
         // 输出抽屉失败不能影响任务完成事实；保留 resultFile，供终端与历史页继续访问。
         console.error('发布 reviewer 输出失败', error)
@@ -519,8 +706,9 @@ function profileName(profile: CliConfig): string {
 }
 
 function clampWait(timeoutMs: number): number {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return DEFAULT_WAIT_MS
-  return Math.min(MAX_WAIT_MS, Math.max(1000, Math.round(timeoutMs)))
+  const value = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs : loadConfig().review.pollIntervalMinutes * 60_000
+  return Math.min(POLL_INTERVAL_MAX_MINUTES * 60_000, Math.max(POLL_INTERVAL_MIN_MINUTES * 60_000, Math.round(value)))
 }
 
 function timestamp(now = new Date()): string {
@@ -540,15 +728,30 @@ function sanitizeSegment(value: string): string {
   return (clean || '未命名任务').slice(0, 80)
 }
 
+/** 输出列表里的产物名：「任务名 + 结果类型 + 序号」；结果文件名带时间戳与 CLI 名，不直接展示 */
+const OUTPUT_RESULT_NAME: Record<TriggerKind, string> = {
+  design: '校验结果',
+  write: '开发结果',
+  review: '检查结果',
+  custom: '执行结果'
+}
+
+/** 产物第二行「CLI名 - 模型名」：CLI 名取适配器显示名，模型留空由渲染层显示「默认」 */
+function producerOf(profile: CliConfig): OutputProducer {
+  const adapter = getAdapter(profile.cli)
+  return { cliLabel: adapter?.label ?? profile.cli, model: profile.model?.trim() || undefined }
+}
+
 const DEFAULT_FOCUS: Record<TriggerKind, string> = {
   design: '结合当前代码库，检查方案的可行性、完整性、边界情况、风险与验证方法。',
   write: '按照任务文档直接修改当前工作区代码，完成必要测试与验证；不要只给建议或方案。',
-  review: '结合文档与当前代码改动，检查正确性、遗漏、回归、安全性和测试覆盖。'
+  review: '结合文档与当前代码改动，检查正确性、遗漏、回归、安全性和测试覆盖。',
+  custom: '按照交付文档与任务指令完成工作，不超出授权范围，并说明结果与验证依据。'
 }
 
 /** 越界禁令必须留在主进程：子 CLI 看不到 SKILL.md，可信输入只有这段和喂给它的文档。 */
 const SCOPE_LOCK =
-  '只允许改动任务指令与专属文档中列为「范围内」的文件；凡被标为「范围外」或「禁止改动」的文件与目录（含测试、配置、锁文件）一律不得新建、修改或删除，任何越界改动都视为本次任务失败。不要读取或执行 .clichilds/requests/ 下其它 CLI 的开发文档。'
+  '只允许改动任务指令与专属文档中列为「范围内」的文件；凡被标为「范围外」或「禁止改动」的文件与目录（含测试、配置、锁文件）一律不得新建、修改或删除，任何越界改动都视为本次任务失败。不要读取或执行本会话 requests 下其它 CLI 的开发文档，也不要扫描其它会话目录。'
 
 function childPrompt(
   kind: TriggerKind,
@@ -558,8 +761,12 @@ function childPrompt(
   task: string | undefined,
   resultFile: string
 ): string {
-  const role =
-    kind === 'design' ? '独立校验实现方案' : kind === 'write' ? '负责完成代码开发' : '独立检查代码实现'
+  const role = {
+    design: '独立校验实现方案',
+    write: '负责完成代码开发',
+    review: '独立检查代码实现',
+    custom: '执行自定义命令交付的任务'
+  }[kind]
   const docs = [`总览文档（只读参考）：${documentPath}`, ...ownDocs.map((p) => `本终端专属文档：${p}`)]
   const fallback = [query.trim() ? `用户原始指令：${query.trim()}` : '', DEFAULT_FOCUS[kind]].join('\n\n')
   return [
@@ -567,10 +774,12 @@ function childPrompt(
     `必须先完整读取主 CLI 交付的 Markdown 文档：\n${docs.join('\n')}`,
     // 主 CLI 逐终端写好 task 时不再塞完整用户指令：那是全部模块范围的并集，正是越界的来源。
     task?.trim() || fallback,
-    kind === 'write' ? SCOPE_LOCK : '',
-    kind === 'write'
-      ? '必须实际完成实现，不要只给建议或方案。完成后在结果中列出改动文件、实现摘要、验证命令与结果、剩余风险。'
-      : '只做审查，不修改业务代码。结果应给出明确问题、证据、严重程度和可执行建议；没有问题也要写明检查范围和结论。',
+    kind === 'write' || kind === 'custom' ? SCOPE_LOCK : '',
+    kind === 'custom'
+      ? '按照任务授权决定执行或只读分析，不擅自扩大范围。完成后在结果中说明完成内容、验证依据、未完成项与剩余风险。'
+      : kind === 'write'
+        ? '必须实际完成实现，不要只给建议或方案。完成后在结果中列出改动文件、实现摘要、验证命令与结果、剩余风险。'
+        : '只做审查，不修改业务代码。结果应给出明确问题、证据、严重程度和可执行建议；没有问题也要写明检查范围和结论。',
     `完成后必须用文件写入工具将完整 Markdown 结果写入下面的精确路径，不得改名：${resultFile}。写入后立即停止，不要等待主 CLI 继续指示。`
   ]
     .filter(Boolean)

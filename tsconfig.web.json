@@ -15,5 +15,5 @@
     "baseUrl": ".",
     "paths": { "@shared/*": ["shared/*"] }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "shared/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "shared/**/*.ts", "packages/ssh/src/contracts.ts", "packages/database/src/contracts.ts"]
 }

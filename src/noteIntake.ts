@@ -86,6 +86,7 @@ export function useNoteIntake(workDir: string): NoteIntake {
   }, [addPaths, addText])
 
   const onDragOver = useCallback((event: ReactDragEvent<HTMLElement>) => {
+    if (!event.dataTransfer.types.includes('Files')) return
     // 不 preventDefault 的话 drop 根本不会触发
     event.preventDefault()
     event.dataTransfer.dropEffect = 'copy'

@@ -1,9 +1,11 @@
 import { randomUUID } from 'crypto'
 import { MAX_CHILD_RETRIES } from '../../shared/types'
 import type {
+  ChildApproval,
   ChildFailure,
   ChildState,
   ChildTargetStatus,
+  OutputProducer,
   RunNextAction,
   RunSnapshot,
   RunState,
@@ -28,6 +30,7 @@ export interface ChildSpec {
   documentPath: string
   ownDocs: string[]
   task?: string
+  resumeSessionId?: string
 }
 
 /** 一个子任务在一次 run 里的全部事实；终端退出后仍然保留，重试靠它 */
@@ -36,6 +39,8 @@ export interface TargetRecord {
   label: string
   index: number
   spec: ChildSpec
+  /** 产物展示用的 CLI 名与模型；每次拉起后按最新档案刷新 */
+  producer: OutputProducer
   state: ChildState
   /** 该目标的终端创建次数：1 = 首次，上限 MAX_CHILD_RETRIES + 1 */
   launches: number
@@ -44,6 +49,9 @@ export interface TargetRecord {
   failure?: ChildFailure
   error?: string
   submissionUncertain?: boolean
+  approval?: ChildApproval
+  approvalSince?: number
+  approvalWaitMs?: number
   /** 当前这次拉起的时刻（超时起算点） */
   startedAt: number
   finishedAt?: number
@@ -90,7 +98,7 @@ export function newRun(input: {
 export function runState(run: RunRecord): RunState {
   if (run.abortedAt) return 'aborted'
   for (const target of run.targets.values()) {
-    if (target.state === 'launching' || target.state === 'running') return 'active'
+    if (target.state === 'launching' || target.state === 'running' || target.state === 'waiting-approval') return 'active'
   }
   return 'finished'
 }
@@ -106,6 +114,7 @@ export function canRetry(target: TargetRecord): boolean {
 export function nextAction(run: RunRecord): RunNextAction {
   const targets = [...run.targets.values()]
   if (run.abortedAt) return 'stop'
+  if (targets.some((target) => target.state === 'waiting-approval')) return 'approve'
   if (targets.every((target) => target.state === 'done')) return 'analyze'
   if (targets.some((target) => canRetry(target))) return 'retry'
   if (targets.some((target) => target.state === 'launching' || target.state === 'running')) return 'wait'
@@ -122,6 +131,7 @@ export function targetStatus(target: TargetRecord, now = Date.now()): ChildTarge
     canRetry: canRetry(target),
     termId: target.termId,
     resultFile: target.resultFile,
+    approval: target.approval,
     failure: target.failure,
     error: target.error,
     elapsedMs: Math.max(0, (target.finishedAt ?? now) - target.startedAt)
@@ -142,7 +152,7 @@ export function snapshot(run: RunRecord, extra: Pick<RunSnapshot, 'changed' | 'r
   }
 }
 
-/** 记下一个子任务的状态转变；只有 done/failed 与作废才唤醒 /wait 的挂起者 */
+/** 完成、失败、待审批或作废时唤醒 /wait。 */
 export function markTarget(
   run: RunRecord,
   target: TargetRecord,
@@ -158,7 +168,8 @@ export function markTarget(
   if (state === 'done' || state === 'failed') target.finishedAt = Date.now()
   else target.finishedAt = undefined
   run.updatedAt = Date.now()
-  if (state === 'done' || state === 'failed') settleWaiters(run)
+  if (state !== 'waiting-approval') target.approval = undefined
+  if (state === 'done' || state === 'failed' || state === 'waiting-approval') settleWaiters(run)
 }
 
 export function abortRun(run: RunRecord): void {

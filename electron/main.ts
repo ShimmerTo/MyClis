@@ -1,8 +1,10 @@
-import { app, BrowserWindow, Menu, nativeImage, Tray } from 'electron'
+import { app, BrowserWindow, dialog, Menu, nativeImage, Tray } from 'electron'
 import { join } from 'path'
-import { getTerminalManager, registerIpc } from './ipc'
+import { expandCodebuddyPortPool } from './cli/portpool'
+import { getTerminalManager, getUpdateManager, registerIpc } from './ipc'
 import { registerNotesScheme } from './notes/assets'
 import { loadConfig } from './config/store'
+import { dataDirectoryErrorMessage, initializeDataDirectory } from './config/dataDirectory'
 import { TITLEBAR_OVERLAY_HEIGHT, type ThemeKind } from '../shared/types'
 
 Menu.setApplicationMenu(null)
@@ -14,10 +16,13 @@ app.setAppUserModelId('com.myclis.app')
 let win: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuitting = false
+let disposeIpc: (() => void) | undefined
 
 /**
- * 窗口/任务栏图标：与托盘图标同一套设计（build/icon.ico 是它的多尺寸版，打包时内嵌进 exe）。
- * dev 下任务栏取的是窗口图标，所以这里必须显式给；打包后 exe 内嵌图标同源，两边一致。
+ * 窗口/任务栏/托盘图标共用 build/icon.png：与 exe 内嵌的 build/icon.ico 同一套设计
+ * （scripts/gen-icon.cjs 一并重绘）。dev 下任务栏取的是窗口图标，所以这里必须显式给；
+ * 打包后 exe 内嵌图标同源，两边一致。托盘之前用内联 base64，那份 PNG 的 IDAT 校验和已损坏，
+ * Chromium 解码结果为空图 —— 托盘项建出来了但看不见图标，所以一律改从这份完整资源读取。
  */
 const APP_ICON = join(app.getAppPath(), 'build', 'icon.png')
 
@@ -93,6 +98,8 @@ function createWindow(): void {
       return
     }
     isQuitting = true
+    event.preventDefault()
+    app.quit()
   })
   win.on('closed', () => {
     win = null
@@ -122,19 +129,9 @@ function updateTrayMenu(): void {
   ]))
 }
 
-/**
- * 托盘图标：32x32 PNG（圆润圆角黑底 + 白 Mclis），是应用 Logo 的原始设计 ——
- * build/icon.ico / build/icon.png 是它的多尺寸版（scripts/gen-icon.cjs 一并重绘），窗口与任务栏图标同源。
- * 之前用 SVG data URL 走 createFromDataURL，而 nativeImage 只认 PNG/JPEG，
- * SVG 会被解成空图 —— 托盘项建出来了但图标是全透明，看起来就是「关闭后托盘没有图标」。
- * 这里直接内联 PNG base64，不依赖磁盘资源文件，打包后也不会丢。
- */
-const TRAY_ICON_PNG =
-  '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'
-
 function createTray(): void {
   if (tray) return
-  tray = new Tray(nativeImage.createFromDataURL(`data:image/png;base64,${TRAY_ICON_PNG}`))
+  tray = new Tray(nativeImage.createFromPath(APP_ICON).resize({ width: 16 }))
   tray.setToolTip('MyClis')
   tray.on('click', showWindow)
   tray.on('double-click', showWindow)
@@ -148,9 +145,27 @@ else app.on('second-instance', showWindow)
 
 app.whenReady().then(() => {
   if (!gotLock) return
-  registerIpc(() => win)
+  let migrationWarning: string | undefined
+  try {
+    migrationWarning = initializeDataDirectory()
+  } catch (error) {
+    dialog.showErrorBox('数据目录不可用', dataDirectoryErrorMessage(error))
+    app.quit()
+    return
+  }
+  disposeIpc = registerIpc(() => win)
+  // 已经下载好的安装包在本次启动就装掉：拉起 Installer 后立刻退出，
+  // 不能再往下建窗口 —— 留在前台会挡住 Installer 覆盖程序文件。
+  if (getUpdateManager()?.installPending()) return
+  // 手动开的 codebuddy 撞端口同样表现为「进程活着、终端没有任何输出」，装了它就顺手
+  // 把它的端口池补足。MyClis 起的终端每次现探测端口，不依赖这里。不阻塞建窗口。
+  void expandCodebuddyPortPool().catch((error) => console.error('扩容 codebuddy 端口池失败', error))
+  // 检查更新放在最后且不阻塞：失败一律静默，结果由使者推给设置页
+  void getUpdateManager()?.checkOnStartup().catch((error: unknown) => console.error('检查更新失败', error))
   createWindow()
   createTray()
+  if (migrationWarning) void dialog.showMessageBox({ type: 'warning', title: '数据目录迁移未完成', message: migrationWarning })
+    .catch((error: unknown) => console.error('显示数据目录提醒失败', error))
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -164,4 +179,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true
+  disposeIpc?.()
+  disposeIpc = undefined
 })

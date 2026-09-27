@@ -1,14 +1,24 @@
 import type { ReactNode } from 'react'
 import { THEMES } from '@shared/types'
 import type { ThemeKind } from '@shared/types'
+import { hasUnseenUpdate, useUpdateState } from '../store'
+import '../theme/ssh-host.css'
+
+const brandIcon = new URL('../../build/icon.png', import.meta.url).href
+
+/** 有新版本且用户还没看过时，在「设置」导航项上点一个红点 */
+const UPDATE_VIEW: View = 'ui'
 
 /** 路由：welcome 只在首次使用（无任何配置）时出现，不进侧栏 */
-export type View = 'welcome' | 'launch' | 'run' | 'notes' | 'ui' | 'commands'
+export type View = 'welcome' | 'launch' | 'dirs' | 'run' | 'notes' | 'ui' | 'commands' | 'ssh' | 'database'
 
-const NAV: { view: View; label: string }[] = [
+const NAV: { view: View; label: string; badge?: string }[] = [
   { view: 'launch', label: '启动' },
-  { view: 'run', label: '运行' },
+  { view: 'dirs', label: '目录' },
+  { view: 'run', label: 'Cli' },
   { view: 'notes', label: '便签' },
+  { view: 'ssh', label: 'SSH' },
+  { view: 'database', label: 'Database' },
   { view: 'ui', label: '设置' },
   { view: 'commands', label: '命令' }
 ]
@@ -31,20 +41,22 @@ export function ShellRail(props: {
   theme: ThemeKind
   onTheme: (t: ThemeKind) => void
 }): JSX.Element {
+  const update = useUpdateState()
+  const dot = hasUnseenUpdate(update) ? UPDATE_VIEW : undefined
   return (
     <aside className="shell-rail">
-      <div className="brand">
-        <span className="brand-mark">M</span>
-        <span className="brand-name">MyClis</span>
-      </div>
       <nav className="shell-nav">
         {NAV.map((n) => (
           <button
             key={n.view}
-            className={props.view === n.view ? 'active' : ''}
+            className={`${props.view === n.view ? 'active' : ''}${n.badge ? ' has-badge' : ''}${dot === n.view ? ' has-dot' : ''}`}
             onClick={() => props.onNav(n.view)}
+            aria-current={props.view === n.view ? 'page' : undefined}
+            aria-label={dot === n.view ? `${n.label}（有新版本）` : undefined}
           >
             {n.label}
+            {n.badge && <span className="shell-nav-badge">{n.badge}</span>}
+            {dot === n.view && <span className="shell-nav-dot" aria-hidden="true" />}
           </button>
         ))}
       </nav>
@@ -104,7 +116,7 @@ export function Chips(props: { items: { text: string; ok?: boolean }[] }): JSX.E
 export function WindowBar(): JSX.Element {
   return (
     <div className="window-bar">
-      <span className="brand-mark">M</span>
+      <img className="brand-mark" src={brandIcon} alt="Mclis" />
       <span className="window-bar-name">MyClis</span>
     </div>
   )

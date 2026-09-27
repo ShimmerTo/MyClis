@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import './theme/theme.css'
+import './theme/notes.css'
 
 /**
  * 全局拖放兜底：没有任何接收方时，Chromium 的默认行为是把整个渲染层替换成被拖入的文件

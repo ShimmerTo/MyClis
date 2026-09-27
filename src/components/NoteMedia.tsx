@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm'
 import type { Note, NoteAssetResult } from '@shared/types'
 import { bytesText } from '../notes'
 import { toast } from './ToastHost'
+import { UrlPreview } from './UrlPreview'
 
 function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).replace(
@@ -156,26 +157,7 @@ export function NoteMedia({ note }: { note: Note }): JSX.Element {
   }
 
   if (asset.media === 'url') {
-    return (
-      <div className="note-media">
-        <div className="note-media-path" title={asset.url}>
-          {asset.url}
-        </div>
-        <div className="note-media-facts">
-          <span className="spacer" />
-          <button
-            type="button"
-            onClick={() =>
-              void window.clichilds
-                .externalOpen(asset.url ?? '')
-                .catch((e: unknown) => toast(errorText(e)))
-            }
-          >
-            用浏览器打开
-          </button>
-        </div>
-      </div>
-    )
+    return <UrlPreview url={asset.url ?? ''} title={note.title} />
   }
 
   return (

@@ -1,7 +1,7 @@
 /**
  * 打包后清理 release 目录里旧版本的安装包：只留与 package.json 当前版本一致的那些。
  * 产物名前缀取自 electron-builder.yml 的 productName（不硬编码，改名后不会静默失效），
- * 只删 `myclis-setup-<版本>.exe[.blockmap]` 与 `myclis-portable-<版本>.exe` 这类文件；
+ * 只删 `myclis-setup-<版本>.exe[.blockmap]` 这类文件；
  * win-unpacked 目录与 builder-*.yml 不带版本号、也不是安装包，一律不动。
  */
 import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
@@ -26,7 +26,7 @@ try {
 }
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-const artifact = new RegExp(`^${escapeRe(productName)}-(?:setup|portable)-(\\d+\\.\\d+\\.\\d+)(?:\\.exe|\\.exe\\.blockmap)$`, 'i')
+const artifact = new RegExp(`^${escapeRe(productName)}-setup-(\\d+\\.\\d+\\.\\d+)(?:\\.exe|\\.exe\\.blockmap)$`, 'i')
 
 let removed = 0
 for (const name of entries) {

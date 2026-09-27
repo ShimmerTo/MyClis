@@ -1,16 +1,10 @@
-import { app } from 'electron'
 import { createHash } from 'crypto'
 import { join } from 'path'
-import { loadConfig } from '../config/store'
+import { DEFAULT_NOTES_DIR } from '../../shared/types'
+import { getDataDirectory } from '../config/dataDirectory'
 
-/**
- * 便签存储根目录：设置里选过就用它，否则默认 userData/clichilds。
- * 按工作目录拆分的便签文件（note-<目录名>-<hash>.json / .done.json）、
- * 旧版单文件 notes.json 与 notes-assets/ 都放这里，改存储目录时一起迁移。
- */
 export function notesBaseDir(): string {
-  const dir = loadConfig().notes?.storageDir?.trim()
-  return dir || join(app.getPath('userData'), 'clichilds')
+  return getDataDirectory()
 }
 
 export function notesPath(): string {
@@ -32,6 +26,7 @@ export const noteDirKey = (workDir: string): string => workDir.replace(/[\\/]+$/
  * 只按目录名会串（C:\a\proj 与 D:\b\proj 同名），带 hash 才互不覆盖。
  */
 export function noteFileStem(workDir: string): string {
+  if (workDir === DEFAULT_NOTES_DIR) return 'note-default'
   const raw = noteDirKey(workDir).split(/[\\/]/).pop() || 'dir'
   const base = raw.replace(/[<>:"/\\|?*\u0000-\u001f.]/g, '-').slice(0, 40).replace(/-+$/, '') || 'dir'
   const hash = createHash('md5').update(noteDirKey(workDir), 'utf-8').digest('hex').slice(0, 8)

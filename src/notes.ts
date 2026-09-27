@@ -1,16 +1,12 @@
+import { DEFAULT_NOTES_DIR } from '@shared/types'
 import type { Note, NoteKind, NoteStatus } from '@shared/types'
 
 /** 取路径最后一段：提示文案与分组标题都用它 */
-export const dirBase = (p: string): string => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p
+export const dirBase = (p: string): string => p === DEFAULT_NOTES_DIR ? '默认便签' : p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p
 
-const STATUS_LABEL: Record<NoteStatus, string> = { todo: '未处理', doing: '进行中', done: '已完成' }
+const STATUS_LABEL: Record<NoteStatus, string> = { todo: '未处理', doing: '进行中', testing: '待测试', done: '已完成' }
 
 export const noteStatusLabel = (status: NoteStatus): string => STATUS_LABEL[status]
-
-/** 点状态标签的循环口径：未处理 → 进行中 → 已完成 → 未处理 */
-export function nextNoteStatus(status: NoteStatus): NoteStatus {
-  return status === 'todo' ? 'doing' : status === 'doing' ? 'done' : 'todo'
-}
 
 /**
  * 是否显示已完成的便签：浮窗与管理页共用一份开关。
@@ -60,7 +56,7 @@ export function bytesText(bytes?: number): string {
  * 被算成两个目录，浮窗里就看不到自己刚加的便签。
  */
 export function sameDir(a: string, b: string): boolean {
-  return a.replace(/[\\/]+$/, '').toLowerCase() === b.replace(/[\\/]+$/, '').toLowerCase()
+  return a.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === b.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 }
 
 /** 某个工作目录下的便签（主进程已按加入时间倒序，这里保持原序） */
@@ -112,9 +108,11 @@ export const NOTES_PROMPT_LIMIT = 8000
 /**
  * 把勾选的便签拼成投递文本。超出上限时截断当前一条并省略其余，返回被省略的条数。
  */
-export function buildNotesPrompt(notes: Note[]): { text: string; omitted: number } {
+export function buildNotesPrompt(notes: Note[], execute = false): { text: string; omitted: number } {
   if (notes.length === 0) return { text: '', omitted: 0 }
-  let text = `以下是我加入便签的内容（共 ${notes.length} 条），请作为本次对话的背景参考：`
+  let text = execute
+    ? `请执行以下便签中的任务（共 ${notes.length} 条），需要澄清时再向我提问：`
+    : `以下是我加入便签的内容（共 ${notes.length} 条），请作为本次对话的背景参考：`
   let omitted = 0
   for (const [index, note] of notes.entries()) {
     const block = `\n\n【${index + 1}】${noteTitle(note)}\n${note.content}`
@@ -125,7 +123,8 @@ export function buildNotesPrompt(notes: Note[]): { text: string; omitted: number
     // 放不下就截断这一条，后面的全部省略；剩余空间太小时直接整条略过
     const room = NOTES_PROMPT_LIMIT - text.length
     if (room > 200) {
-      text += `${block.slice(0, room)}\n…（本条已截断）`
+      const suffix = '\n…（本条已截断）'
+      text += `${block.slice(0, room - suffix.length)}${suffix}`
       omitted = notes.length - index - 1
     } else {
       omitted = notes.length - index

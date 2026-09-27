@@ -1,11 +1,11 @@
-import { app } from 'electron'
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { getDataDirectory } from './dataDirectory'
 import type { AppConfig } from '../../shared/types'
 import { mergeConfig } from './schema'
 
 function configPath(): string {
-  return join(app.getPath('userData'), 'clichilds', 'config.json')
+  return join(getDataDirectory(), 'config.json')
 }
 
 let cache: AppConfig | null = null

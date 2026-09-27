@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
-import type { CliId, SessionSummary, TerminalKind, UiConfig } from '@shared/types'
+import type { CliId, HistoryChild, Note, SessionSummary, TerminalKind, UiConfig } from '@shared/types'
+import { latestHistoryChildren } from '@shared/children'
+import { TranscriptModal } from '../components/TranscriptModal'
 import { TERMINALS } from '@shared/types'
 import TerminalView, { TerminalStatus } from '../components/TerminalView'
 import ReviewerPanel from '../components/ReviewerPanel'
@@ -13,8 +15,15 @@ import { NewTabModal } from '../components/NewTabModal'
 import { NotesTrigger } from '../components/NotesPanel'
 import { sameDir } from '../notes'
 import { focusTerminal } from '../terminalPool'
-import { saveConfig, startMainSession, useNotes, useSessions, useSettings } from '../store'
+import { saveConfig, startMainSession, useHistory, useNotes, useSessions, useSettings } from '../store'
 import { PHASE_LABEL, outputState, runTime, shellLabel } from '../display'
+import { sessionPermission } from '@shared/profile'
+import { ModalFrame } from '../components/approval'
+import { ErrorBoundary } from '../components/ErrorBoundary'
+import { SshBadge, SshPageContent, SshStatusTrigger } from '../ssh'
+import { setSshUi, useSshStore } from '../ssh/store'
+import { DatabaseBadge, DatabaseStatusTrigger } from '../database/DatabaseHost'
+import { sshRequestKey } from '../ssh/ui'
 
 interface Props {
   workDir: string
@@ -26,7 +35,10 @@ interface Props {
   resumeSessionId?: string
   /** 启动就绪后自动投递的初始提示词（「用其他 CLI 继续」时带入） */
   initialPrompt?: string
+  /** 初始提示词所含便签：启动时关联到主会话 */
+  noteIds?: string[]
   onBack: () => void
+  onApprovalTargetChange: (target: { sessionId: string; container: HTMLDivElement } | null) => void
 }
 
 const DEFAULT_UI: UiConfig = {
@@ -40,6 +52,9 @@ const DEFAULT_UI: UiConfig = {
   diffMode: 'unified',
   statusBarMode: 'always'
 }
+
+/** 平铺时每个子终端的最小宽度：右栏放不下这么多格就向左挤压主终端（主终端保留 240px，见 .wb-body.tile .wb-main） */
+const TILE_MIN_W = 150
 
 const dirBase = (p: string): string => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p
 const hiddenBySession = new Map<string, Set<string>>()
@@ -81,9 +96,16 @@ export default function WorkbenchPage({
   sessionId,
   resumeSessionId,
   initialPrompt,
-  onBack
+  noteIds,
+  onBack,
+  onApprovalTargetChange
 }: Props): JSX.Element {
   const [mainId, setMainId] = useState<string | null>(sessionId ?? null)
+  const [approvalContainer, setApprovalContainer] = useState<HTMLDivElement | null>(null)
+  useEffect(() => {
+    onApprovalTargetChange(mainId && approvalContainer ? { sessionId: mainId, container: approvalContainer } : null)
+    return () => onApprovalTargetChange(null)
+  }, [mainId, approvalContainer, onApprovalTargetChange])
   const [error, setError] = useState('')
   const [sideWidth, setSideWidth] = useState(() => (sessionId ? layoutBySession.get(sessionId)?.sideWidth : undefined) ?? 480)
   const [childWidths, setChildWidths] = useState<Record<string, number>>(
@@ -94,9 +116,10 @@ export default function WorkbenchPage({
   /** 「静默」判定的当前时间：输出停了之后主进程不再推会话，靠本地定时器驱动重算 */
   const [now, setNow] = useState(() => Date.now())
   const [pickOpen, setPickOpen] = useState(false)
-  /** 「发送到 CLI」预选：打开新建会话弹窗时定位到该目录并预勾选这条便签 */
-  const [pickNote, setPickNote] = useState<{ id: string; workDir: string } | null>(null)
+  /** 「发送到 CLI」预选：保留便签的目录、勾选与上次执行档案 */
+  const [pickNote, setPickNote] = useState<Note | null>(null)
   const [closingId, setClosingId] = useState<string | null>(null)
+  const [sshPanelDir, setSshPanelDir] = useState<string | null>(null)
   const [gitBranch, setGitBranch] = useState<string | null>(null)
   const [stripErr, setStripErr] = useState('')
   /** 用户主动选择看原始输出的终端（error 阶段不再盖加载层） */
@@ -106,6 +129,18 @@ export default function WorkbenchPage({
 
   const { cfg, setCfg, clis } = useSettings()
   const sessions = useSessions()
+  const history = useHistory()
+  const [historyChild, setHistoryChild] = useState<HistoryChild | null>(null)
+  const [resumingChild, setResumingChild] = useState(false)
+  // 同步锁拦住同一帧的连点；异步恢复结果不能打开到用户后来切换的主标签上。
+  const childResumePending = useRef(false)
+  const currentMainId = useRef<string | null | undefined>(mainId)
+  useEffect(() => {
+    currentMainId.current = mainId
+    // undefined 表示已卸载；null 仅表示当前没有主标签，仍需清理恢复状态。
+    return () => { currentMainId.current = undefined }
+  }, [mainId])
+  const { snapshot: sshSnapshot } = useSshStore()
   const notes = useNotes()
   const output = useOutputSession(mainId)
   const ui = cfg?.ui ?? DEFAULT_UI
@@ -152,6 +187,9 @@ export default function WorkbenchPage({
         : s.role === 'child' && (mainId ? s.parentTermId === mainId : s.workDir === activeWorkDir)
     )
     .sort((a, b) => a.startedAt - b.startedAt || (a.index ?? 0) - (b.index ?? 0))
+  const historicalChildren = latestHistoryChildren(history.find((record) => record.sessionId === mainId)?.children ?? [])
+    .filter((child) => !children.some((live) => live.id === child.termId ||
+      (!!child.nativeSessionId && live.cli === child.cli && live.nativeSessionId === child.nativeSessionId)))
   const visibleChildren = children.filter((child) => !hidden.has(child.id))
   /** 全局还在跑的子终端与手动终端数：主会话都结束后，靠它判断要不要留在执行页 */
   const runningChildren = sessions.filter((s) => s.role === 'child' || s.role === 'shell').length
@@ -162,10 +200,10 @@ export default function WorkbenchPage({
   }
 
   /**
-   * 返回启动页。主会话与子任务留在后台继续跑，但手动开的纯 shell 一并关掉 ——
-   * 它们只属于工作台的子终端区，回到启动页就没有入口能再点回来。
+   * 返回进入工作台前的那个页面（由 App 保留的 view 决定）。主会话与子任务留在后台继续跑，
+   * 但手动开的纯 shell 一并关掉 —— 它们只属于工作台的子终端区，出去就没有入口能再点回来。
    */
-  const backToLauncher = (): void => {
+  const goBack = (): void => {
     for (const s of sessions) {
       if (s.role === 'shell') window.clichilds.termKill(s.id)
     }
@@ -182,6 +220,7 @@ export default function WorkbenchPage({
       hiddenBySession.set(prev, new Set(hidden))
     }
     setMainId(id)
+    setHistoryChild(null)
     const layout = layoutBySession.get(id)
     setSideWidth(layout?.sideWidth ?? 480)
     setChildWidths(layout?.childWidths ?? {})
@@ -202,7 +241,7 @@ export default function WorkbenchPage({
       return
     }
     let alive = true
-    startMainSession({ workDir, profileId, resumeSessionId, initialPrompt })
+    startMainSession({ workDir, profileId, resumeSessionId, initialPrompt, noteIds })
       .then((id) => {
         if (!alive) return
         startedRef.current = true
@@ -215,7 +254,7 @@ export default function WorkbenchPage({
     return () => {
       alive = false
     }
-  }, [workDir, profileId, sessionId, resumeSessionId, initialPrompt, cli])
+  }, [workDir, profileId, sessionId, resumeSessionId, initialPrompt, noteIds, cli])
 
   // 后台还在跑的主会话也补成标签，并对齐目录/档案；已退出的摘掉
   useEffect(() => {
@@ -286,9 +325,10 @@ export default function WorkbenchPage({
     dir: string,
     pid: string,
     cliId: CliId,
-    initialPrompt?: string
+    initialPrompt?: string,
+    noteIds?: string[]
   ): Promise<void> => {
-    const id = await startMainSession({ workDir: dir, profileId: pid, fresh: true, initialPrompt })
+    const id = await startMainSession({ workDir: dir, profileId: pid, fresh: true, initialPrompt, noteIds })
     rememberTab({ id, workDir: dir, cli: cliId, profileId: pid })
     activate(id)
     setTabTick((v) => v + 1)
@@ -327,16 +367,52 @@ export default function WorkbenchPage({
 
   /** 状态栏弹层里点一个子终端：取消隐藏并聚焦；本来可见的就滚到可视区 */
   const openChild = (id: string): void => {
-    if (hidden.has(id)) {
-      const next = new Set(hidden)
+    setHidden((old) => {
+      if (!old.has(id)) return old
+      const next = new Set(old)
       next.delete(id)
-      setHiddenIds(next)
-    }
+      if (mainId) hiddenBySession.set(mainId, new Set(next))
+      return next
+    })
     // 取消隐藏要等新面板挂载、xterm 重新 attach 完，聚焦才有落点
     window.setTimeout(() => {
+      if (currentMainId.current !== mainId) return
       focusTerminal(id)
       document.querySelector(`[data-child-id="${id}"]`)?.scrollIntoView({ block: 'nearest' })
     }, 0)
+  }
+
+  /** 历史项直接恢复原生子终端；绝不走重投旧任务的 termRestart。 */
+  const resumeHistoryChild = (child: HistoryChild): void => {
+    const live = children.find((s) => s.role === 'child' && (s.id === child.termId ||
+      (!!child.nativeSessionId && s.cli === child.cli && s.nativeSessionId === child.nativeSessionId)))
+    if (live) {
+      setHistoryChild(null)
+      openChild(live.id)
+      return
+    }
+    if (!mainId || childResumePending.current) return
+    const parentId = mainId
+    childResumePending.current = true
+    setResumingChild(true)
+    setStripErr('')
+    void window.clichilds.childResume(parentId, child.termId)
+      .then(({ termId }) => {
+        if (currentMainId.current !== parentId) return
+        setHistoryChild(null)
+        openChild(termId)
+      })
+      .catch((e: unknown) => {
+        console.error('恢复历史子 CLI 失败', e)
+        if (currentMainId.current !== parentId) return
+        setStripErr(`恢复子 CLI 失败：${e instanceof Error ? e.message : String(e)}`)
+        // 恢复失败仍可读原对话，并保留重试入口。
+        setHistoryChild(child)
+      })
+      .finally(() => {
+        childResumePending.current = false
+        if (currentMainId.current !== undefined) setResumingChild(false)
+      })
   }
 
   /** 用系统原生终端窗口打开一份同样的：失败（终端已结束、Shell 缺失）在顶部条上报出来 */
@@ -360,17 +436,16 @@ export default function WorkbenchPage({
   const mainConcealed =
     !!main && (main.runtime.phase === 'booting' || (main.runtime.phase === 'error' && !revealed.includes(main.id)))
   const tile = ui.reviewerLayout === 'tile'
+  // 平铺时右栏至少要放得下「每格 150px」：不够就靠这个 min-width 把主终端往左挤，绝不出现右栏内的横向滚动条
   const sideStyle: CSSProperties = tile
-    ? ui.tileWidthMode === 'fixed'
-      ? { width: `${sideWidth}px`, minWidth: `${Math.min(ui.tileWidth, 320)}px` }
-      : { width: `${sideWidth}px`, minWidth: '320px' }
+    ? { width: `${sideWidth}px`, minWidth: `${Math.max(320, visibleChildren.length * TILE_MIN_W)}px` }
     : { width: `${sideWidth}px` }
-  // 平铺模式：每个终端都能拖右边缘改宽度；equal 模式默认平分，拖过的那一格固定成拖出来的宽度
+  // 平铺模式：每格最小 150px；设定宽度（或手动拖出来的宽度）只当上限，右栏放不下时各格一起收窄
   const panelStyle = (id: string): CSSProperties | undefined => {
     if (!tile) return undefined
-    const pinned = childWidths[id]
-    if (ui.tileWidthMode === 'fixed') return { flex: '0 0 auto', width: `${pinned ?? ui.tileWidth}px` }
-    return pinned ? { flex: '0 0 auto', width: `${pinned}px` } : { flex: '1 1 0', minWidth: '260px' }
+    const max = childWidths[id] ?? (ui.tileWidthMode === 'fixed' ? ui.tileWidth : null)
+    const base: CSSProperties = { flex: '1 1 0', minWidth: `${TILE_MIN_W}px` }
+    return max ? { ...base, maxWidth: `${max}px` } : base
   }
 
   const tabs = tabOrder
@@ -386,18 +461,21 @@ export default function WorkbenchPage({
     if (!pickNote) return list
     return list.some((d) => sameDir(d, pickNote.workDir)) ? list : [pickNote.workDir, ...list]
   })()
+  const noteProfile = cfg?.cliConfigs.find((profile) => profile.id === pickNote?.execution?.profileId &&
+    clis.some((status) => status.id === profile.cli && status.installed))
 
   return (
     <div className={`workbench ${tabsMode ? 'tabs-mode' : 'hover-mode'}`}>
       {tabsMode && (
       <div className="wb-tabstrip">
-        <button className="wb-back" onClick={backToLauncher} title="返回启动页（主会话与子任务继续在后台运行；手动开的终端会关闭）">
+        <button className="wb-back" onClick={goBack} title="返回来时的页面（主会话与子任务继续在后台运行；手动开的终端会关闭）">
           ←
         </button>
         <div className="wb-tabs">
           {tabs.map((t) => {
             const label = t.info?.profileLabel ?? t.desc.cli
             const phase = t.info?.runtime.phase ?? 'booting'
+            const approvals = sshSnapshot?.requests.filter((request) => request.sessionId === t.id && request.state === 'pending_approval') ?? []
             const busy = phase === 'delivering' || phase === 'running'
             // 干活中（投递/运行）却 30 秒没输出：页卡文字加粗；启动中与已完成不算
             const quiet = !!t.info && busy && now - t.info.lastOutputAt >= 30_000
@@ -406,13 +484,16 @@ export default function WorkbenchPage({
             const detail = t.info
               ? `${PHASE_LABEL[phase]} · 已运行 ${runTime(t.info.startedAt)} · ${outputState(t.info.lastOutputAt)}`
               : '正在启动…'
+            const permission = t.info ? sessionPermission(clis, t.info.cli, t.info.permissionMode) : null
             return (
               <div
                 key={t.id}
                 className={`wb-tab ${t.id === mainId ? 'on' : ''} ${phase === 'error' ? 'bad' : ''} ${quiet ? 'quiet' : ''}`}
                 role="button"
                 tabIndex={0}
-                title={`${label} · ${t.desc.workDir}\n${detail}\n点 × 结束该会话并关闭标签`}
+                title={`${label} · ${t.desc.workDir}\n${detail}${
+                  permission ? `\n运行权限：${permission.label}${permission.dangerous ? '（高危）' : ''}` : ''
+                }\n点 × 结束该会话并关闭标签`}
                 onClick={() => activate(t.id)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
@@ -424,7 +505,18 @@ export default function WorkbenchPage({
                   if (e.button === 1) setClosingId(t.id)
                 }}
               >
-                {spinning ? (
+                {approvals.length > 0 ? (
+                  <SshBadge
+                    kind="approval"
+                    className="wb-tab-approval"
+                    count={approvals.length}
+                    title={`待审核 ${approvals.length} 条 SSH 命令，点击处理`}
+                    onClick={() => {
+                      activate(t.id)
+                      setSshUi({ approvalId: sshRequestKey(approvals[0]) })
+                    }}
+                  />
+                ) : spinning ? (
                   <svg className="wb-tab-snake" viewBox="0 0 14 14" width="12" height="12" aria-hidden="true">
                     <rect className="wb-tab-snake-base" x="1" y="1" width="12" height="12" rx="2" pathLength={100} />
                     <rect className="wb-tab-snake-run" x="1" y="1" width="12" height="12" rx="2" pathLength={100} />
@@ -493,8 +585,8 @@ export default function WorkbenchPage({
         <div className="wb-topzone">
           <div className="wb-toolbar">
             <div className="wb-row">
-              <button onClick={backToLauncher} title="返回启动页（主会话与子任务继续在后台运行；手动开的终端会关闭）">
-                ← 启动
+              <button onClick={goBack} title="返回来时的页面（主会话与子任务继续在后台运行；手动开的终端会关闭）">
+                ← 返回
               </button>
               <span className="wb-info">
                 {mainLabel} · {activeWorkDir}
@@ -545,7 +637,7 @@ export default function WorkbenchPage({
         </div>
       ) : (
         <>
-        <div className="wb-body">
+        <div className={`wb-body${tile ? ' tile' : ''}`}>
           <div className="wb-main">
             {mainId && main ? (
               mainConcealed ? (
@@ -561,12 +653,13 @@ export default function WorkbenchPage({
             ) : tabOrder.length === 0 && runningChildren > 0 ? (
               <div className="workbench-placeholder">
                 <p>没有运行中的主 CLI</p>
-                <p className="hint">还有 {runningChildren} 个子终端或手动终端在执行，全部结束后会自动返回启动页。</p>
-                <button onClick={backToLauncher}>← 返回启动页</button>
+                <p className="hint">还有 {runningChildren} 个子终端或手动终端在执行，全部结束后会自动返回来时的页面。</p>
+                <button onClick={goBack}>← 返回</button>
               </div>
             ) : (
               <p className="hint">终端启动中…</p>
             )}
+            <div className="approval-slot" ref={setApprovalContainer} />
           </div>
           {visibleChildren.length > 0 && (
             <div
@@ -600,7 +693,7 @@ export default function WorkbenchPage({
                     const start = childWidths[id] ?? box?.width ?? ui.tileWidth
                     beginDrag(event, (delta) => setChildWidths((old) => ({
                       ...old,
-                      [id]: Math.max(260, Math.min(1600, start + delta))
+                      [id]: Math.max(TILE_MIN_W, Math.min(1600, start + delta))
                     })))
                   } : undefined}
                 />
@@ -631,23 +724,47 @@ export default function WorkbenchPage({
             info={main}
             statusExtra={
               <>
-                <ChildClisTrigger children={children} hidden={hidden} onOpen={openChild} />
+                <ChildClisTrigger
+                  key={mainId}
+                  children={children}
+                  history={historicalChildren}
+                  hidden={hidden}
+                  resuming={resumingChild}
+                  onOpen={openChild}
+                  onHistory={resumeHistoryChild}
+                />
                 <NotesTrigger
                   workDir={activeWorkDir}
                   termId={mainId ?? undefined}
                   onExecuteNote={(note) => {
-                    setPickNote({ id: note.id, workDir: note.workDir })
+                    setPickNote(note)
                     setPickOpen(true)
                   }}
                 />
                 <ChangesTrigger session={changes} />
                 <OutputTrigger session={output} />
+                <SshStatusTrigger workDir={activeWorkDir} />
+                <DatabaseStatusTrigger workDir={activeWorkDir} />
+                <DatabaseBadge sessionId={mainId ?? undefined} />
               </>
             }
             gitBranch={gitBranch}
           />
         ) : null}
         </>
+      )}
+
+      {historyChild && mainId && (
+        <TranscriptModal
+          key={`${mainId}-${historyChild.termId}`}
+          title="历史子 CLI"
+          subtitle={stripErr || '继续只恢复原对话，不会自动重跑旧任务；主 CLI 可继续向它下发新任务。'}
+          tabs={[{ key: historyChild.termId, label: historyChild.profileLabel ?? historyChild.cli, cli: historyChild.cli,
+            nativeSessionId: historyChild.nativeSessionId, cwd: activeWorkDir, done: historyChild.done }]}
+          onClose={() => setHistoryChild(null)}
+          resumeDisabledReason={resumingChild ? '正在恢复…' : undefined}
+          onResume={() => resumeHistoryChild(historyChild)}
+        />
       )}
 
       {pickOpen && cfg && (
@@ -657,9 +774,9 @@ export default function WorkbenchPage({
           clis={clis}
           allowNotes
           notes={notes}
-          initialNoteId={pickNote?.id}
+          initialNoteIds={pickNote ? [pickNote.id] : undefined}
           defaultWorkDir={pickNote?.workDir ?? activeWorkDir}
-          defaultProfileId={main?.profileId ?? profileId ?? cfg.launch.mainCliId ?? ''}
+          defaultProfileId={noteProfile?.id ?? main?.profileId ?? profileId ?? cfg.launch.mainCliId ?? ''}
           onStart={startNewTab}
           onClose={() => {
             setPickOpen(false)
@@ -695,6 +812,12 @@ export default function WorkbenchPage({
             </div>
           </div>
         </div>
+      )}
+
+      {sshPanelDir && (
+        <ModalFrame title="SSH" className="ssh-manager-modal" onClose={() => setSshPanelDir(null)}>
+          <ErrorBoundary label="SSH 面板"><SshPageContent workDir={sshPanelDir} /></ErrorBoundary>
+        </ModalFrame>
       )}
     </div>
   )
@@ -779,22 +902,27 @@ function MainsCards(props: {
   )
 }
 
-const CHILD_TASK_LABEL = { design: '方案校验', write: '代码编写', review: '代码检查' } as const
+const CHILD_TASK_LABEL = { design: '方案校验', write: '代码编写', review: '代码检查', custom: '自定义命令' } as const
 
 /**
- * 状态栏上的子 CLI 入口：图标 + 已最小化的数量，点击向上弹出本会话的全部子终端。
+ * 状态栏上的子 CLI 入口：图标 + 存活与历史去重总数，点击向上弹出本会话的全部子终端。
  * 顶部不再单开一栏放隐藏的终端 —— 状态栏在所有进入工作台的路径上都有
  * （点卡片进入、历史「继续」、用其他 CLI 继续），入口自然跟着在。
  * 浮层 portal 到 body：状态栏是 overflow:hidden，留在里面会被裁掉。
  */
 function ChildClisTrigger(props: {
   children: SessionSummary[]
+  history: HistoryChild[]
   hidden: Set<string>
+  resuming: boolean
   onOpen: (id: string) => void
+  onHistory: (child: HistoryChild) => void
 }): JSX.Element | null {
+  const { clis } = useSettings()
   const [pop, setPop] = useState<{ right: number; bottom: number } | null>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const hiddenCount = props.children.filter((child) => props.hidden.has(child.id)).length
+  const totalCount = props.children.length + props.history.length
   const close = (): void => setPop(null)
 
   useEffect(() => {
@@ -816,15 +944,17 @@ function ChildClisTrigger(props: {
     }
   }, [pop])
 
-  if (props.children.length === 0) return null
+  if (props.children.length === 0 && props.history.length === 0) return null
 
   return (
     <>
       <button
         type="button"
         ref={trigger}
-        className={`child-clis-trigger ${hiddenCount > 0 ? 'has' : ''}`}
-        title={`子 CLI：本会话 ${props.children.length} 个${hiddenCount > 0 ? `，其中 ${hiddenCount} 个已最小化` : ''}；点开查看全部`}
+        className="child-clis-trigger"
+        aria-label={`子 CLI，共 ${totalCount} 个`}
+        aria-busy={props.resuming}
+        title={`子 CLI：当前 ${props.children.length} 个，历史 ${props.history.length} 个${hiddenCount > 0 ? `，其中 ${hiddenCount} 个已最小化` : ''}；${props.resuming ? '正在恢复历史子终端…' : '点开查看全部'}`}
         onClick={() => {
           if (pop) {
             close()
@@ -856,13 +986,15 @@ function ChildClisTrigger(props: {
           />
           <path d="M8.4 10.4h3.2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
         </svg>
-        {hiddenCount > 0 ? <span className="child-clis-count">{hiddenCount}</span> : null}
+        <span className="child-clis-count">{totalCount}</span>
       </button>
       {pop
         ? createPortal(
             <div className="child-clis-pop" style={{ right: pop.right, bottom: pop.bottom }}>
               <span className="hint">子 CLI · 点一项打开</span>
-              {props.children.map((child) => (
+              {props.children.map((child) => {
+                const permission = sessionPermission(clis, child.cli, child.permissionMode)
+                return (
                 <button
                   key={child.id}
                   type="button"
@@ -882,9 +1014,33 @@ function ChildClisTrigger(props: {
                       ? ''
                       : `${CHILD_TASK_LABEL[child.taskKind]} #${child.index ?? 1}`}
                   </span>
+                  {permission ? (
+                    <span
+                      className={`child-clis-perm${permission.dangerous ? ' dangerous' : ''}`}
+                      title={`运行权限：${permission.label}${permission.description ? ` · ${permission.description}` : ''}`}
+                    >
+                      {permission.label}
+                    </span>
+                  ) : null}
                   <span className="spacer" />
-                  <span className="child-clis-phase">{PHASE_LABEL[child.runtime.phase]}</span>
+                  <span className="child-clis-phase">{child.runtime.approval ? '待审批' : PHASE_LABEL[child.runtime.phase]}</span>
                   {props.hidden.has(child.id) ? <span className="child-clis-tag">已隐藏</span> : null}
+                </button>
+                )
+              })}
+              {props.history.length > 0 && (
+                <span className="hint">{props.resuming ? '正在恢复历史子终端…' : '历史子 CLI · 点一项恢复原生终端'}</span>
+              )}
+              {props.history.map((child) => (
+                <button key={child.termId} type="button" className="child-clis-item"
+                  disabled={props.resuming}
+                  title="恢复原对话，不会重投旧任务；失败时可查看详情"
+                  onClick={() => { props.onHistory(child); close() }}>
+                  <span className={`status-dot ${child.done ? 'done' : 'ready'}`} />
+                  <span className="child-clis-name">{child.profileLabel ?? child.cli}</span>
+                  <span className="child-clis-kind">{child.taskKind ? CHILD_TASK_LABEL[child.taskKind] : ''}</span>
+                  <span className="spacer" />
+                  <span className="child-clis-phase">{child.done ? '历史 · 已完成' : '历史 · 已中断'}</span>
                 </button>
               ))}
             </div>,

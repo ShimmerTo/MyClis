@@ -118,9 +118,10 @@ export function locateSessionFile(
 /**
  * 只读文件头部，用于回填列表时拿 cwd/开始时间；绝不整文件读进内存。
  * codex 把 session_meta 连同基础指令塞在第一行，实测单行 40KB+，所以要按需放大。
+ * maxBytes 供「知道字段大概落在哪里」的调用方放宽窗口，默认只取头部一小段。
  */
-export function readHeadLines(file: string): string[] {
-  let budget = 64 * 1024
+export function readHeadLines(file: string, maxBytes = 64 * 1024): string[] {
+  let budget = maxBytes
   const CAP = 1024 * 1024
   for (;;) {
     const chunk = readChunk(file, 0, budget)

@@ -3,18 +3,24 @@ import { createPortal } from 'react-dom'
 import {
   CHILD_TIMEOUT_MAX_MINUTES,
   CHILD_TIMEOUT_MIN_MINUTES,
-  MAX_CHILD_RETRIES
+  MAX_CHILD_RETRIES,
+  POLL_INTERVAL_MIN_MINUTES,
+  POLL_INTERVAL_MAX_MINUTES
 } from '@shared/types'
 import type { AppConfig, BridgeInfo, BuiltinCommandKind, CommandConfig, InjectionConfig, ThemeKind } from '@shared/types'
 import { buildPresentInjection, DEFAULT_PROMPTS, PLACEHOLDER_HINT } from '@shared/skillPrompts'
-import { installedClis, adoptConfig, applyTheme, saveConfig, useSettings } from '../store'
+import { installedClis, applyTheme, saveConfig, useSettings, waitForConfigSaves } from '../store'
+import { CliManagement } from '../components/CliManagement'
+import { DataDirectorySettings } from '../components/DataDirectorySettings'
+import { toast } from '../components/ToastHost'
+import { UpdateCard } from '../components/UpdateCard'
 import { CliConfigListEditor, CliModelsEditor, Section, WorkDirsEditor } from '../components/SettingsSections'
 import { AppShell, Chips } from '../components/AppShell'
-import { ConfirmDialog } from '../components/ConfirmDialog'
 import type { View } from '../components/AppShell'
+import { SshSkillSettings } from '../ssh'
 
 interface Props {
-  view: Extract<View, 'run' | 'ui' | 'commands'>
+  view: Extract<View, 'dirs' | 'run' | 'ui' | 'commands'>
   onNav: (v: View) => void
 }
 
@@ -33,10 +39,10 @@ export default function SettingsPage({ view, onNav }: Props): JSX.Element {
   const { cfg, setCfg, clis, redetect, loadError } = useSettings()
   const [saveError, setSaveError] = useState('')
   const [saveOk, setSaveOk] = useState(false)
-  /** 待确认的便签迁移目标目录：选完目录先问「是否迁移」，取消就完全不切换 */
-  const [migrateDir, setMigrateDir] = useState<string | null>(null)
+  const [cliChecking, setCliChecking] = useState(false)
   /** 超时输入框的草稿：输入过程中先不动配置，失焦/回车时才夹到合法区间落盘 */
   const [timeoutDraft, setTimeoutDraft] = useState<string | null>(null)
+  const [pollDraft, setPollDraft] = useState<string | null>(null)
   const saveRevision = useRef(0)
   const okTimer = useRef<number | undefined>(undefined)
   const pendingSave = useRef<number | undefined>(undefined)
@@ -90,37 +96,19 @@ export default function SettingsPage({ view, onNav }: Props): JSX.Element {
   const patchUi = (p: Partial<AppConfig['ui']>): void => patch({ ui: { ...cfg.ui, ...p } })
   const patchCommands = (commands: CommandConfig[], debounceMs = 0): void => patch({ commands }, debounceMs)
 
-  /** 选便签存储目录：选完先弹确认，问是否把现有数据迁过去（取消 = 放弃切换） */
-  const pickNotesDir = (): void => {
-    void window.clichilds
-      .dirPick({ create: true })
-      .then((dir) => {
-        if (dir) setMigrateDir(dir)
-      })
-      .catch((e: unknown) => setSaveError(saveErrorMessage(e)))
-  }
-
-  const doMigrate = (): void => {
-    const dir = migrateDir
-    if (!dir) return
-    window.clichilds
-      .notesSetStorage({ dir })
-      .then((next) => {
-        adoptConfig(next)
-        setMigrateDir(null)
-        setSaveOk(true)
-        window.clearTimeout(okTimer.current)
-        okTimer.current = window.setTimeout(() => setSaveOk(false), 2000)
-      })
-      .catch((e: unknown) => {
-        setMigrateDir(null)
-        setSaveError(saveErrorMessage(e))
-      })
-  }
-
   const dirCount = cfg.workDirs.filter((d) => d.trim()).length
   const enabledCommands = cfg.commands.filter((command) => command.enabled).length
   const customCommands = cfg.commands.filter((command) => !command.builtinKind).length
+
+  /** 数据目录迁移会重启应用：先冲刷还在 debounce 里的输入，不能让最后一轮输入丢掉 */
+  const flushPendingSaves = async (): Promise<void> => {
+    if (pendingSave.current !== undefined) {
+      window.clearTimeout(pendingSave.current)
+      pendingSave.current = undefined
+      if (latestCfg.current) await saveConfig(latestCfg.current)
+    }
+    await waitForConfigSaves()
+  }
 
   return (
     <AppShell
@@ -133,13 +121,19 @@ export default function SettingsPage({ view, onNav }: Props): JSX.Element {
         setCfg(next)
         void saveConfig(next).catch(() => undefined)
       }}
-      title={view === 'run' ? '设置 · 运行' : view === 'ui' ? '设置 · 界面' : '设置 · 命令'}
+      title={
+        view === 'dirs' ? '设置 · 目录'
+          : view === 'run' ? '设置 · Cli'
+            : view === 'ui' ? '设置 · 界面' : '设置 · 命令'
+      }
       desc={
-        view === 'run'
-          ? 'CLI、模型、运行权限、终端与工作目录；修改后立即生效'
-          : view === 'ui'
-            ? '子任务 CLI 窗口的展示形式、便签与系统通知'
-            : '管理内置命令、自定义命令及其注入开关'
+        view === 'dirs'
+          ? '主终端与子任务使用的工作目录清单；启动页从这里取目录'
+          : view === 'run'
+            ? '本机 CLI 检测、终端与 CLI 档案；修改立即生效'
+            : view === 'ui'
+              ? '子任务 CLI 窗口的展示形式、便签与系统通知；全局数据目录迁移需重启'
+              : '管理内置命令、自定义命令及其注入开关'
       }
       chips={
         <Chips
@@ -171,33 +165,30 @@ export default function SettingsPage({ view, onNav }: Props): JSX.Element {
           </div>,
           document.body
         )}
-      {migrateDir ? (
-        <ConfirmDialog
-          title="迁移便签存储目录"
-          confirmText="迁移"
-          onCancel={() => setMigrateDir(null)}
-          onConfirm={doMigrate}
-        >
-          将把现有便签数据与图片资产迁移到下面这个目录，之后的新便签也保存在那里（仍按工作目录区分归属）。
-          选择「取消」则不迁移，保持当前目录不变。
-          <div className="settings-path" title={migrateDir}>
-            {migrateDir}
-          </div>
-        </ConfirmDialog>
-      ) : null}
       {view === 'commands' ? (
-        <CommandsTab
-          commands={cfg.commands}
-          onChange={patchCommands}
-          injections={cfg.injections}
-          onInjectionsChange={(injections) => patch({ injections })}
-        />
+        <>
+          <SshSkillSettings />
+          <CommandsTab
+            commands={cfg.commands}
+            onChange={patchCommands}
+            injections={cfg.injections}
+            onInjectionsChange={(injections) => patch({ injections })}
+          />
+        </>
+      ) : view === 'dirs' ? (
+        <WorkDirsEditor dirs={cfg.workDirs} onChange={(dirs) => patch({ workDirs: dirs })} />
       ) : view === 'run' ? (
         <>
           <Section
             title="本机 CLI 检测"
             hint="codex / qoder / codebuddy / pi"
-            action={<button onClick={() => void redetect()}>重新检测</button>}
+            action={<button type="button" className="link cli-action" disabled={cliChecking} aria-busy={cliChecking}
+              aria-label={cliChecking ? '正在重新检测' : '重新检测'} onClick={() => {
+                setCliChecking(true)
+                void redetect().catch((error: unknown) => toast(saveErrorMessage(error))).finally(() => setCliChecking(false))
+              }}>
+              {cliChecking ? <span className="cli-action-spinner" aria-hidden="true" /> : '重新检测'}
+            </button>}
           >
             <div className="cli-grid">
               {clis.map((c) => (
@@ -207,7 +198,7 @@ export default function SettingsPage({ view, onNav }: Props): JSX.Element {
                     <span className="cli-name">{c.label}</span>
                     {c.installed && <span className="cli-ver">{c.version}</span>}
                   </div>
-                  <div className="cli-status">{c.installed ? '已安装' : '未检测到'}</div>
+                  <CliManagement status={c} />
                   {c.installed && <div className="cli-path" title={c.path}>{c.path}</div>}
                   {c.diagnostics?.map((line) => <div key={line} className="cli-path" title={line}>{line}</div>)}
                 </div>
@@ -229,8 +220,6 @@ export default function SettingsPage({ view, onNav }: Props): JSX.Element {
             </div>
           </Section>
 
-          <WorkDirsEditor dirs={cfg.workDirs} onChange={(dirs) => patch({ workDirs: dirs })} />
-
           <CliModelsEditor clis={clis} models={cfg.cliModels} onChange={(cliModels) => patch({ cliModels })} />
 
           <CliConfigListEditor
@@ -249,7 +238,11 @@ export default function SettingsPage({ view, onNav }: Props): JSX.Element {
                   designCliIds: cfg.launch.designCliIds.filter((id) => ids.has(id)),
                   codeWriterCliIds: cfg.launch.codeWriterCliIds.filter((id) => ids.has(id)),
                   codeReviewCliIds: cfg.launch.codeReviewCliIds.filter((id) => ids.has(id))
-                }
+                },
+                commands: cfg.commands.map((command) => command.builtinKind ? command : {
+                  ...command,
+                  childCliIds: (command.childCliIds ?? []).filter((id) => ids.has(id))
+                })
               })
             }}
           />
@@ -350,9 +343,31 @@ export default function SettingsPage({ view, onNav }: Props): JSX.Element {
               {cfg.ui.reviewerLayout === 'vertical'
                 ? '子任务窗口在右侧自上而下堆叠，各占一份高度。'
                 : cfg.ui.tileWidthMode === 'fixed'
-                  ? `子任务窗口在右侧栏内横向平铺，每个固定 ${cfg.ui.tileWidth}px，放不下时横向滚动。`
-                  : '子任务窗口在右侧栏内横向平铺，均分右侧可用宽度。'}
+                  ? `子任务窗口在右侧栏内横向平铺，每格不超过 ${cfg.ui.tileWidth}px；放不下时向左挤压主终端，各格最低 150px，不出现横向滚动。`
+                  : '子任务窗口在右侧栏内横向平铺，均分右侧可用宽度；放不下时向左挤压主终端，每格最低 150px，不出现横向滚动。'}
             </div>
+          </Section>
+
+          <Section title="主 CLI 轮询" hint="等待子 CLI 结果时，无状态变化的查询间隔">
+            <div className="row">
+              <label className="field" htmlFor="poll-interval">等待间隔</label>
+              <input id="poll-interval" className="num" type="number" min={POLL_INTERVAL_MIN_MINUTES}
+                max={POLL_INTERVAL_MAX_MINUTES} step={1}
+                value={pollDraft ?? String(cfg.review.pollIntervalMinutes)}
+                onChange={(event) => setPollDraft(event.target.value)}
+                onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }}
+                onBlur={() => {
+                  const draft = pollDraft
+                  setPollDraft(null)
+                  if (draft === null || !draft.trim()) return
+                  const parsed = Number(draft)
+                  if (!Number.isFinite(parsed)) return
+                  const minutes = Math.round(Math.min(POLL_INTERVAL_MAX_MINUTES, Math.max(POLL_INTERVAL_MIN_MINUTES, parsed)))
+                  if (minutes !== cfg.review.pollIntervalMinutes) patch({ review: { ...cfg.review, pollIntervalMinutes: minutes } })
+                }} />
+              <span className="hint">分钟（默认 1，{POLL_INTERVAL_MIN_MINUTES} – {POLL_INTERVAL_MAX_MINUTES}）</span>
+            </div>
+            <div className="callout">保存后下一次等待生效；子任务完成、失败或需要审批时立即返回，不必等满间隔。此设置不改变子任务结果超时。</div>
           </Section>
 
           <Section title="子任务超时" hint="子任务多久没写出结果文件就判为失败">
@@ -423,7 +438,7 @@ export default function SettingsPage({ view, onNav }: Props): JSX.Element {
             </div>
           </Section>
 
-          <Section title="便签" hint="状态栏浮窗的行为与数据存储位置">
+          <Section title="便签" hint="浮窗行为与全局文字收集">
             <div className="row">
               <label className="field">浮窗行为</label>
               <div className="seg">
@@ -447,19 +462,22 @@ export default function SettingsPage({ view, onNav }: Props): JSX.Element {
                 : '浮窗一直留在屏幕上，点右上角「—」或按 Esc 才隐藏。'}
             </div>
             <div className="row">
-              <label className="field">存储目录</label>
-              <span className="hint settings-path" title={cfg.notes.storageDir || ''}>
-                {cfg.notes.storageDir || '默认：应用数据目录（userData/clichilds）'}
-              </span>
-              <button type="button" onClick={pickNotesDir}>
-                选择目录…
-              </button>
+              <label className="switch-field">
+                <input type="checkbox" checked={cfg.notes.selectionCaptureEnabled}
+                  onChange={(event) => patch({ notes: { ...cfg.notes, selectionCaptureEnabled: event.target.checked } })} />
+                全局划词保存到便签（默认关闭）
+              </label>
             </div>
             <div className="callout">
-              便签数据（notes.json 与图片资产）都存放在这里；选择新目录后会询问是否把现有数据迁移过去，
-              迁移后仍按工作目录区分归属。选择「取消」则保持当前目录不变。
+              开启后，在 MyClis 内或支持选区读取的外部应用中，用鼠标划选或双击选中文字，附近会出现「存到便签」，点击才保存到默认便签。浮动按钮不抢焦点，不占快捷键，不读取或修改剪贴板；未保存的选区只短暂保留在内存。密码框不会收集，Xshell 等未提供标准选区接口的自绘终端、部分页面或管理员窗口不支持时不显示按钮。MyClis 须保持运行（可隐藏到托盘）。
             </div>
           </Section>
+
+          <DataDirectorySettings beforeMigrate={flushPendingSaves} />
+          <UpdateCard
+            config={cfg.update}
+            onChange={(next) => patch({ update: { ...cfg.update, ...next } })}
+          />
         </>
       )}
     </AppShell>
@@ -478,13 +496,31 @@ function CommandsTab(props: {
       debounceMs
     )
   const [bridge, setBridge] = useState<BridgeInfo | null>(null)
+  const [syncing, setSyncing] = useState(false)
   useEffect(() => {
-    void window.clichilds.bridgeInfo().then(setBridge).catch(() => undefined)
+    void window.clichilds.bridgeInfo().then(setBridge).catch((error: unknown) => toast(saveErrorMessage(error)))
   }, [])
+  const syncCommands = async (): Promise<void> => {
+    setSyncing(true)
+    try {
+      await window.clichilds.skillsSync()
+      setBridge(await window.clichilds.bridgeInfo())
+      toast('命令已同步；已启动 CLI 的缓存与系统提示需重新加载或恢复会话后生效')
+    } catch (error) {
+      toast(saveErrorMessage(error))
+    } finally {
+      setSyncing(false)
+    }
+  }
   const toggleInjection = (id: string, enabled: boolean): void =>
     props.onInjectionsChange(props.injections.map((item) => (item.id === id ? { ...item, enabled } : item)))
   return (
     <>
+    <Section title="命令同步" hint="启动应用时自动同步，也可手动重新写入当前版本的命令"
+      action={<button type="button" disabled={syncing} aria-busy={syncing} onClick={() => void syncCommands()}>{syncing ? '同步中…' : '重新同步命令'}</button>}>
+      {bridge && <div className="hint">当前运行 MyClis {bridge.appVersion} · {bridge.packaged ? '打包版' : '开发版'}<div className="settings-path">{bridge.appPath}</div></div>}
+      <div className="callout">同步使用当前运行应用的代码，不会加载磁盘上的新构建，也不会结束会话。升级应用请先保存工作，再退出旧实例并启动新版本；已运行 CLI 缓存的命令和启动注入不会自动替换。</div>
+    </Section>
     <Section
       title="命令"
       hint="修改后立即重新注入已配置的 CLI"
@@ -495,6 +531,8 @@ function CommandsTab(props: {
             id: crypto.randomUUID(),
             name: `my-command-${props.commands.filter((item) => !item.builtinKind).length + 1}`,
             enabled: true,
+            allowChildClis: false,
+            childCliIds: [],
             prompt: '请处理以下需求：\n{query}'
           }])}
         >
@@ -505,7 +543,7 @@ function CommandsTab(props: {
       <div className="callout">
         命令正文只支持 {PLACEHOLDER_HINT}。三个内置命令会按当前会话配置附加子 CLI 调度协议；输出展示协议已移到下方「默认注入」，不写进命令文件。
         <br />
-        关闭命令后会从 CLI 中移除；自定义命令只执行提示词，不会自动分发子 CLI。
+        关闭命令后会从 CLI 中移除；自定义命令默认只执行正文，勾选「允许自主调用子 CLI」才附加调度协议，请到启动页配置 CLI，下次主会话生效。
       </div>
 
       {props.commands.map((command) => {
@@ -538,6 +576,19 @@ function CommandsTab(props: {
               <span>/</span>
               <input value={command.name} maxLength={48} onChange={(e) => change(command.id, { name: e.target.value.replace(/^\//, '') })} />
             </div>
+            {!kind && (
+              <div className="row">
+                <label className="switch-field">
+                  <input
+                    type="checkbox"
+                    checked={command.allowChildClis === true}
+                    onChange={(e) => change(command.id, { allowChildClis: e.target.checked })}
+                  />
+                  允许自主调用子 CLI
+                </label>
+                <span className="hint">到启动页配置 CLI；未开启时仅执行正文，开启后附加调度协议，不改动命令正文，下次主会话生效。</span>
+              </div>
+            )}
             <textarea
               className="prompt-area"
               spellCheck={false}

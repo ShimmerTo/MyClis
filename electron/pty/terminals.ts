@@ -13,6 +13,7 @@ import type {
   TriggerKind
 } from '../../shared/types'
 import { resolveShell } from './shells'
+import { ApprovalScreen } from './approval'
 import { watchNativeSession } from '../sessions/nativeid'
 import type { NativeIdWatch } from '../sessions/nativeid'
 import { getAdapter } from '../cli/registry'
@@ -35,24 +36,33 @@ const READY_WINDOW = 8192
 const DELIVERY_POLL_MS = 1500
 /** 确认后再留一会儿才删临时文件，给模型读取留一轮时间 */
 const PROMPT_FILE_KEEP_MS = 60_000
-
-
-export type TaskAssignments = Record<TriggerKind, CliConfig[]>
+/** 首问已读到、标题还没挖到时，头部放宽到这么多字节再试 */
+const HEAD_DEEP_BYTES = 1024 * 1024
+/** 深挖次数上限：最多多读 6MB 就该断定这个会话不写标题，不能常驻大窗口 */
+const HEAD_DEEP_TRIES = 6
+export type TaskAssignments = Record<Exclude<TriggerKind, 'custom'>, CliConfig[]> & {
+  custom?: Record<string, CliConfig[]>
+}
 
 function cloneTaskAssignments(assignments: TaskAssignments): TaskAssignments {
   return {
     design: assignments.design.map((profile) => ({ ...profile })),
     write: assignments.write.map((profile) => ({ ...profile })),
-    review: assignments.review.map((profile) => ({ ...profile }))
+    review: assignments.review.map((profile) => ({ ...profile })),
+    custom: Object.fromEntries(Object.entries(assignments.custom ?? {}).map(([id, profiles]) =>
+      [id, profiles.map((profile) => ({ ...profile }))]))
   }
 }
 
 interface TerminalOptionsBase {
   /** 预分配的终端 id（主会话要在启动注入里带上它，只能在 spawn 前定下来） */
   id?: string
+  workspaceSessionId?: string
   profileId?: string
   /** 档案显示名（别名），落到 TerminalInfo.profileLabel */
   label?: string
+  /** 本次启动实际使用的权限模式 id，落到 TerminalInfo.permissionMode 供界面显示 */
+  permissionMode?: string
   taskKind?: TriggerKind
   index?: number
   model?: string
@@ -85,6 +95,7 @@ interface TerminalOptionsBase {
 interface CliTerminalOptions extends TerminalOptionsBase {
   role: 'main' | 'child'
   cli: CliId
+  mainEnv?: { MYCLIS_SSH_TOKEN: string; MYCLIS_SSH_SESSION: string; MYCLIS_BRIDGE_URL: string; MYCLIS_DB_TOKEN?: string; MYCLIS_DB_SESSION?: string }
 }
 
 /** 用户手动开的纯 shell：没有启动行，也就没有就绪等待、transcript 与用量 */
@@ -156,6 +167,7 @@ interface Managed {
   runtime: TerminalRuntimeState
   usage?: TokenUsage
   initialQuery?: string
+  title?: string
   taskAssignments?: TaskAssignments
   /** 就绪前的输出攒下来会被丢弃，界面等 phase 离开 booting 后才挂载 */
   concealBoot?: boolean
@@ -179,6 +191,7 @@ interface Managed {
   idleNotified?: boolean
   /** 剥离 ANSI 后的屏幕尾部：nudge 判断主 CLI 是不是停在输入框 */
   plainTail: string
+  approvalScreen?: ApprovalScreen
   /** 该 CLI 的投递契约，nudge 与粘贴链路共用 */
   delivery?: DeliveryProfile
   /** 层1 投递写下的临时文件，终端结束时清理（确认时不能删：模型可能还没读） */
@@ -254,7 +267,18 @@ export class TerminalManager {
   /** 会话当前的运行阶段（子任务失败判定要读它：phase=error 表示任务没投递进输入框） */
   runtimeOf(id: string): TerminalRuntimeState | undefined {
     const m = this.map.get(id)
-    return m ? { ...m.runtime } : undefined
+    return m ? { ...m.runtime, approval: m.approvalScreen?.current() } : undefined
+  }
+
+  chooseApproval(sessionId: string, termId: string, approvalId: string, option: string): void {
+    const m = this.map.get(termId)
+    if (!this.mainById(sessionId) || m?.info.role !== 'child' || m.info.parentTermId !== sessionId) {
+      throw new Error('只能处理当前主会话所属子 CLI 的审批')
+    }
+    if (!m.approvalScreen) throw new Error('此子 CLI 没有可控制的审批菜单')
+    const keys = m.approvalScreen.choose(approvalId, option)
+    m.proc.write(keys)
+    this.notify()
   }
 
   /** 「用原生窗口打开一份」需要的参数：工作目录、该终端自己的 Shell，以及 CLI 会话的同一行启动命令 */
@@ -300,14 +324,22 @@ export class TerminalManager {
   taskContext(
     workDir: string,
     kind: TriggerKind,
-    sessionId?: string
+    sessionId?: string,
+    commandId?: string
   ): { main: TerminalInfo; profiles: CliConfig[] } | undefined {
     const managed = this.pickMain(workDir, sessionId, true)
     if (!managed) return undefined
-    return {
-      main: managed.info,
-      profiles: (managed.taskAssignments?.[kind] ?? []).map((item) => ({ ...item }))
+    let profiles: CliConfig[]
+    if (kind === 'custom') {
+      const custom = managed.taskAssignments?.custom
+      if (!commandId || !custom || !Object.hasOwn(custom, commandId)) {
+        throw new Error('当前主会话未启用此自定义命令的自主调用，请检查配置并重新启动主会话')
+      }
+      profiles = custom[commandId]
+    } else {
+      profiles = managed.taskAssignments?.[kind] ?? []
     }
+    return { main: managed.info, profiles: profiles.map((item) => ({ ...item })) }
   }
 
   sessions(): SessionSummary[] {
@@ -319,7 +351,8 @@ export class TerminalManager {
         lastOutputAt: m.lastOutputAt,
         done: m.done,
         initialQuery: m.initialQuery,
-        runtime: { ...m.runtime },
+        title: m.title,
+        runtime: { ...m.runtime, approval: m.approvalScreen?.current() },
         usage: m.usage ? { ...m.usage } : undefined
       }))
   }
@@ -404,7 +437,7 @@ export class TerminalManager {
     if (m && !m.info.nativeSessionId) {
       m.info.nativeSessionId = nativeSessionId
       this.startUsageWatch(id, m)
-      this.startQueryWatch(id, m)
+      this.startHeadWatch(id, m)
       this.notify()
     }
     for (const cb of this.nativeIdListeners) cb(id, nativeSessionId)
@@ -425,30 +458,40 @@ export class TerminalManager {
   }
 
   /**
-   * 问题描述来自 CLI 自己的 transcript，首条用户消息往往是敲下去之后才落盘的，
-   * 所以拿到原生 id 后隔一段时间重试几次，读到就停。
+   * 问题描述与任务名都来自 CLI 自己的 transcript：首条用户消息要敲下去才落盘，
+   * 标题更是要等模型跑过一两轮才写进文件，所以拿到原生 id 后按间隔重读头部，两个都读到才停。
    */
-  private startQueryWatch(id: string, managed: Managed): void {
-    if (managed.queryTimer || managed.initialQuery) return
+  private startHeadWatch(id: string, managed: Managed): void {
+    if (managed.queryTimer || (managed.initialQuery && managed.title)) return
     if (managed.info.cli === 'shell') return
     const adapter = getAdapter(managed.info.cli)
     if (!adapter) return
     let tries = 0
+    let deepTries = 0
     let file = ''
     const attempt = (): void => {
       managed.queryTimer = undefined
-      if (this.map.get(id) !== managed || managed.initialQuery) return
+      if (this.map.get(id) !== managed || (managed.initialQuery && managed.title)) return
       tries += 1
+      // 首问已读到却没有标题：标题记录实测会落在常规头部窗口之外，放宽窗口再挖几轮，
+      // 挖不到就认这个会话没有标题，不为一个可选的展示字段常驻大窗口
+      const deep = !!managed.initialQuery && !managed.title
+      if (deep && deepTries >= HEAD_DEEP_TRIES) return
       const nativeSessionId = managed.info.nativeSessionId
       if (nativeSessionId) {
         try {
           // 定位一次就记住；之后只重读这一份文件头部，不用再遍历目录
           file = file || locateSessionFile(adapter, nativeSessionId)?.file || ''
-          const query = file ? initialQueryOf(adapter, readHeadLines(file)) : undefined
-          if (query) {
-            managed.initialQuery = query
-            this.notify()
-            return
+          if (file) {
+            if (deep) deepTries += 1
+            const headLines = readHeadLines(file, deep ? HEAD_DEEP_BYTES : undefined)
+            const initialQuery = managed.initialQuery ?? initialQueryOf(adapter, headLines)
+            const title = managed.title ?? adapter.readSessionHead?.(headLines)?.title
+            if (initialQuery !== managed.initialQuery || title !== managed.title) {
+              managed.initialQuery = initialQuery
+              managed.title = title
+              this.notify()
+            }
           }
         } catch {
           file = ''
@@ -553,24 +596,46 @@ export class TerminalManager {
     this.notify()
   }
 
-  create(opts: CreateTerminalOptions): TerminalInfo {
+  reparentChildren(oldId: string, newId: string, workspaceSessionId: string): void {
+    for (const managed of this.map.values()) {
+      if (managed.info.role !== 'child' || managed.info.parentTermId !== oldId) continue
+      managed.info.parentTermId = newId
+      managed.info.workspaceSessionId = workspaceSessionId
+    }
+    this.notify()
+  }
+
+  /** 异步：启动前可能要向 adapter 取端口这类现探测的资源（见 CliAdapter.launchEnv） */
+  async create(opts: CreateTerminalOptions): Promise<TerminalInfo> {
     const shell = resolveShell(opts.shell)
     if (!shell) throw new Error(`终端不可用：${opts.shell}（请确认已安装 Git for Windows）`)
     const wanted = opts.id ?? randomUUID()
-    // 预分配 id 撞上在跑的终端时直接换一个：注入文案里的 id 失效会走兜底，总好过覆盖台账
+    const mainEnv = opts.role === 'main' ? opts.mainEnv : undefined
+    if (mainEnv && this.map.has(wanted)) throw new Error('主会话标识已存在，请重新启动会话')
     const id = this.map.has(wanted) ? randomUUID() : wanted
+    const env = { ...process.env } as Record<string, string>
+    for (const key of Object.keys(env)) {
+      if (['MYCLIS_SSH_TOKEN', 'MYCLIS_SSH_SESSION', 'MYCLIS_DB_TOKEN', 'MYCLIS_DB_SESSION', 'MYCLIS_BRIDGE_URL'].includes(key.toUpperCase())) delete env[key]
+    }
+    if (mainEnv) Object.assign(env, mainEnv)
+    // CLI 自己声明要带的启动环境（codebuddy 的 SERVER__PORT 之类）：通用层不认具体 CLI。
+    // 没有声明的 CLI 一次都不 await，启动时序与原来完全一致。
+    const hook = opts.cli === 'shell' ? undefined : getAdapter(opts.cli)?.launchEnv
+    if (hook) Object.assign(env, await hook())
     const proc = pty.spawn(shell.file, shell.args, {
       name: 'xterm-256color',
       cols: 120,
       rows: 30,
       cwd: opts.workDir,
-      env: { ...process.env } as Record<string, string>
+      env
     })
     const info: TerminalInfo = {
       id,
+      workspaceSessionId: opts.workspaceSessionId,
       role: opts.role,
       profileId: opts.profileId,
       profileLabel: opts.label,
+      permissionMode: opts.permissionMode,
       taskKind: opts.taskKind,
       index: opts.index,
       cli: opts.cli,
@@ -602,8 +667,13 @@ export class TerminalManager {
       taskAssignments: opts.taskAssignments ? cloneTaskAssignments(opts.taskAssignments) : undefined
     }
     this.map.set(id, managed)
+    if (opts.role === 'child') {
+      managed.approvalScreen = new ApprovalScreen(opts.cli, () => {
+        if (this.map.get(id) === managed) this.notify()
+      })
+    }
     this.startUsageWatch(id, managed)
-    this.startQueryWatch(id, managed)
+    this.startHeadWatch(id, managed)
     this.notify()
     // 没预分配 id 的 CLI（codex）只能事后观测；纯 shell 会话没有 id 可观测
     if (opts.role !== 'shell' && opts.initialCommand && !info.nativeSessionId) {
@@ -652,6 +722,7 @@ export class TerminalManager {
     }
     proc.onData((data) => {
       if (this.map.get(id) !== managed) return
+      managed.approvalScreen?.write(data)
       if (managed.attached) this.emit(CH.termData, { id, data })
       else managed.raw = (managed.raw + data).slice(-65536)
       screen = (screen + data).slice(-ECHO_WINDOW)
@@ -671,14 +742,14 @@ export class TerminalManager {
       if (settleTimer) clearTimeout(settleTimer)
       settleTimer = setTimeout(() => {
         settleTimer = null
-        if (!handshakeActive) return
+        if (!handshakeActive || managed.approvalScreen?.blocksAutoInput()) return
         const key = opts.handshake!(screen)
         if (!key || keysSent >= 6 || Date.now() - lastKeyAt < 800) return
         proc.write(key)
         screen = ''
         keysSent += 1
         lastKeyAt = Date.now()
-      }, 400)
+      }, managed.approvalScreen ? 650 : 400)
     })
     proc.onExit(() => this.remove(id))
 
@@ -730,7 +801,8 @@ export class TerminalManager {
         let verifyAt = 0
         let lastVerifyAt = 0
         let matchSince = 0
-        const bootAt = Date.now()
+        let bootAt = Date.now()
+        let approvalTick = 0
         if (deliveryTimer) clearInterval(deliveryTimer)
         handshakeActive = true
         keysSent = 0
@@ -747,6 +819,17 @@ export class TerminalManager {
             return
           }
           const now = Date.now()
+          if (managed.approvalScreen?.current()) {
+            approvalTick ||= now
+            return
+          }
+          if (approvalTick) {
+            const paused = now - approvalTick
+            bootAt += paused
+            if (typedAt) typedAt += paused
+            if (verifyAt) verifyAt += paused
+            approvalTick = 0
+          }
           const quiet = now - lastDataAt > (prof?.readyQuietMs ?? 1200)
           if (state === 'boot') {
             // 就绪 = 输入框文案命中 且（屏幕静默 或 文案已稳定出现）。
@@ -830,6 +913,7 @@ export class TerminalManager {
   write(id: string, data: string): void {
     const managed = this.map.get(id)
     if (!managed) return
+    if (!/^\x1b\[(?:I|O|<\d+;\d+;\d+[Mm])$/.test(data)) managed.approvalScreen?.invalidate()
     managed.proc.write(data)
     if (managed.runtime.phase === 'ready') {
       // 焦点上报（\x1b[I）、鼠标回传这类纯控制序列是终端挂载/TUI 带来的自动回包，
@@ -848,7 +932,9 @@ export class TerminalManager {
 
   resize(id: string, cols: number, rows: number): void {
     try {
-      this.map.get(id)?.proc.resize(Math.max(20, cols), Math.max(6, rows))
+      const managed = this.map.get(id)
+      managed?.proc.resize(Math.max(20, cols), Math.max(6, rows))
+      managed?.approvalScreen?.resize(Math.max(20, cols), Math.max(6, rows))
     } catch {
       /* pty 已退出时忽略 */
     }
@@ -860,6 +946,7 @@ export class TerminalManager {
     this.map.delete(id)
     managed.stopStartup?.()
     managed.stopDeliveryWatch?.()
+    managed.approvalScreen?.dispose()
     managed.nativeWatch?.stop()
     managed.usageWatch?.stop()
     // 层1 写下的临时文件不能留在用户仓库里

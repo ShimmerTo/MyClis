@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
-import type { Note } from '@shared/types'
-import { ipcErrorText, nextNoteStatus, noteKindLabel, noteStamp, noteStatusLabel, noteTitle } from '../notes'
+import { useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
+import { NOTE_STATUSES } from '@shared/types'
+import type { Note, NoteStatus } from '@shared/types'
+import { ipcErrorText, noteKindLabel, noteStamp, noteStatusLabel, noteTitle } from '../notes'
 import { ConfirmDialog } from './ConfirmDialog'
 import { NoteMedia } from './NoteMedia'
 import { toast } from './ToastHost'
@@ -112,10 +114,12 @@ function IconRun(): JSX.Element {
 
 interface Props {
   note: Note
+  leading?: ReactNode
+  trailing?: ReactNode
   /** 保存标题（与文本类便签的正文） */
-  onSave: (patch: { title: string; content: string }) => void
+  onSave: (patch: { title: string; content: string }) => Promise<void>
   onRemove: () => void
-  /** 发送到 CLI：拉起新建会话弹窗并预勾选这条便签（只有便签浮窗传，管理页没有新建会话入口） */
+  /** 拉起新建会话弹窗并预勾选这条便签 */
   onExecute?: () => void
   /** 默认展开正文 */
   defaultOpen?: boolean
@@ -127,12 +131,19 @@ interface Props {
  * 一条便签：标题 + 类型 + 状态 + 添加时间一行，展开看正文，可就地编辑。
  * 状态栏浮窗与主菜单管理页共用同一份，避免两处展示口径分叉。
  */
-export function NoteItem({ note, onSave, onRemove, onExecute, defaultOpen, autoEdit }: Props): JSX.Element {
+export function NoteItem({ note, leading, trailing, onSave, onRemove, onExecute, defaultOpen, autoEdit }: Props): JSX.Element {
   const [open, setOpen] = useState(!!defaultOpen || !!autoEdit)
   const [editing, setEditing] = useState(!!autoEdit)
   const [title, setTitle] = useState(note.title)
   const [content, setContent] = useState(note.content)
   const [confirmRemove, setConfirmRemove] = useState(false)
+
+  useEffect(() => {
+    if (autoEdit) {
+      setEditing(true)
+      setOpen(true)
+    }
+  }, [autoEdit])
 
   // 主进程每次变更后整表推送，非编辑态要跟着刷新，否则看到的是旧正文
   useEffect(() => {
@@ -144,9 +155,33 @@ export function NoteItem({ note, onSave, onRemove, onExecute, defaultOpen, autoE
   // 文件/网址类便签的正文就是路径，改了等于换一个目标，只能删了重加
   const editableBody = note.kind === 'text'
 
-  const save = (): void => {
-    onSave({ title, content: editableBody ? content : note.content })
-    setEditing(false)
+  // 点正文进编辑态时光标直接落到内容框；点编辑图标或新建仍从标题开始
+  const titleRef = useRef<HTMLInputElement>(null)
+  const bodyRef = useRef<HTMLTextAreaElement>(null)
+  const focusBody = useRef(false)
+  useEffect(() => {
+    if (!editing) return
+    if (focusBody.current) bodyRef.current?.focus()
+    else titleRef.current?.focus()
+    focusBody.current = false
+  }, [editing])
+
+  const saving = useRef(false)
+  const [busy, setBusy] = useState(false)
+  const save = async (): Promise<void> => {
+    if (saving.current) return
+    saving.current = true
+    setBusy(true)
+    try {
+      await onSave({ title, content: editableBody ? content : note.content })
+      setEditing(false)
+      toast('保存成功')
+    } catch (error) {
+      toast(ipcErrorText(error))
+    } finally {
+      saving.current = false
+      setBusy(false)
+    }
   }
 
   const cancel = (): void => {
@@ -155,14 +190,21 @@ export function NoteItem({ note, onSave, onRemove, onExecute, defaultOpen, autoE
     setEditing(false)
   }
 
-  const cycleStatus = (): void => {
-    const next = nextNoteStatus(note.status)
-    void window.clichilds
-      .notesUpdate({ id: note.id, status: next })
-      .then(() => {
-        if (next === 'done') toast('已标记为已完成，默认隐藏；勾选「显示已完成」可查看')
-      })
-      .catch((error: unknown) => toast(ipcErrorText(error)))
+  const statusSaving = useRef(false)
+  const [statusBusy, setStatusBusy] = useState(false)
+  const changeStatus = async (next: NoteStatus): Promise<void> => {
+    if (statusSaving.current || next === note.status) return
+    statusSaving.current = true
+    setStatusBusy(true)
+    try {
+      await window.clichilds.notesUpdate({ id: note.id, status: next })
+      if (next === 'done') toast('已标记为已完成，默认隐藏；勾选「显示已完成」可查看')
+    } catch (error) {
+      toast(ipcErrorText(error))
+    } finally {
+      statusSaving.current = false
+      setStatusBusy(false)
+    }
   }
 
   const copyContent = (): void => {
@@ -177,6 +219,7 @@ export function NoteItem({ note, onSave, onRemove, onExecute, defaultOpen, autoE
       className={`note-item ${editing ? 'editing' : ''} ${open || editing ? 'open' : ''} status-${note.status}`}
     >
       <div className="note-head">
+        {leading}
         <button
           type="button"
           className="note-toggle"
@@ -187,14 +230,18 @@ export function NoteItem({ note, onSave, onRemove, onExecute, defaultOpen, autoE
           <span className="note-title">{noteTitle(note)}</span>
         </button>
         <span className={`note-kind ${note.kind}`}>{noteKindLabel(note.kind)}</span>
-        <button
-          type="button"
+        <select
           className={`note-status ${note.status}`}
-          onClick={cycleStatus}
-          title="点击切换状态：未处理 → 进行中 → 已完成"
+          value={note.status}
+          disabled={statusBusy}
+          aria-label="便签状态"
+          aria-busy={statusBusy}
+          onChange={(event) => void changeStatus(event.target.value as NoteStatus)}
+          title="选择便签状态"
         >
-          {noteStatusLabel(note.status)}
-        </button>
+          {NOTE_STATUSES.map((status) => <option key={status} value={status}>{noteStatusLabel(status)}</option>)}
+        </select>
+        {trailing}
         <span className="note-time" title={`添加于 ${noteStamp(note.createdAt)}`}>
           {noteStamp(note.createdAt)}
         </span>
@@ -202,10 +249,10 @@ export function NoteItem({ note, onSave, onRemove, onExecute, defaultOpen, autoE
         <span className="note-actions">
           {editing ? (
             <>
-              <button type="button" className="note-act" onClick={save} title="保存">
+              <button type="button" className="note-act" disabled={busy} onClick={() => void save()} title="保存 (Ctrl+S)">
                 <IconSave />
               </button>
-              <button type="button" className="note-act" onClick={cancel} title="放弃修改">
+              <button type="button" className="note-act" disabled={busy} onClick={cancel} title="放弃修改">
                 <IconCancel />
               </button>
             </>
@@ -228,6 +275,7 @@ export function NoteItem({ note, onSave, onRemove, onExecute, defaultOpen, autoE
                 type="button"
                 className="note-act"
                 onClick={() => {
+                  focusBody.current = false
                   setEditing(true)
                   setOpen(true)
                 }}
@@ -249,9 +297,17 @@ export function NoteItem({ note, onSave, onRemove, onExecute, defaultOpen, autoE
       </div>
 
       {editing ? (
-        <div className="note-edit">
+        <div className="note-edit" onKeyDown={(event) => {
+          if (event.ctrlKey && !event.altKey && event.key.toLowerCase() === 's') {
+            event.preventDefault()
+            event.stopPropagation()
+            if (!event.nativeEvent.isComposing) void save()
+          }
+        }}>
           <input
             className="note-input"
+            ref={titleRef}
+            disabled={busy}
             value={title}
             placeholder="标题"
             onChange={(e) => setTitle(e.target.value)}
@@ -260,6 +316,8 @@ export function NoteItem({ note, onSave, onRemove, onExecute, defaultOpen, autoE
             // 高度由 CSS 按内容算（.note-textarea 的 field-sizing），所以不设 rows
             <textarea
               className="note-textarea"
+              ref={bodyRef}
+              disabled={busy}
               value={content}
               placeholder="正文"
               onChange={(e) => setContent(e.target.value)}
@@ -271,9 +329,19 @@ export function NoteItem({ note, onSave, onRemove, onExecute, defaultOpen, autoE
           )}
         </div>
       ) : open ? (
-        // 文本便签展示的就是正文本身；文件/网址类便签展示的是那个文件的内容
         note.kind === 'text' ? (
-          <pre className="note-body">{note.content}</pre>
+          <pre className="note-body" role="button" tabIndex={0} title="点击编辑正文"
+            onClick={() => {
+              if (!window.getSelection()?.isCollapsed) return
+              focusBody.current = true
+              setEditing(true)
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              event.preventDefault()
+              focusBody.current = true
+              setEditing(true)
+            }}>{note.content || '点击编辑正文'}</pre>
         ) : (
           <NoteMedia note={note} />
         )

@@ -170,7 +170,9 @@ button.primary:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
-input,
+/* 复选框不套文本框样式：height 会把它的布局盒撑到 30px（方框本体仍是原生 13px、
+   在盒子里居中画），于是比同行文案低一截，且只能靠 align-items: center 掩盖 */
+input:not([type='checkbox']),
 select {
   background: var(--bg-input);
   color: var(--text);
@@ -225,6 +227,13 @@ button:focus-visible {
 .app-page {
   flex: 1;
   min-height: 0;
+  display: flex;
+}
+
+/* 页面让出右侧会话栏的宽度；栏本身固定宽，不参与压缩 */
+.app-page > *:first-child {
+  flex: 1;
+  min-width: 0;
 }
 
 /* 非执行页的通用标题栏（代替被隐藏的系统标题栏）：整条可拖动 */
@@ -303,6 +312,8 @@ button:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* 导轨顶部不再有品牌区，菜单整体垂直居中；rail-foot 的 margin-top:auto 仍把它压在一侧 */
+  margin: auto 0;
 }
 
 .shell-nav button {
@@ -442,6 +453,60 @@ button:focus-visible {
   flex: 1;
 }
 
+/* 配置卡片：SSH / Database 的连接卡片与启动页、运行页的任务卡同一观感 */
+.unit-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+  padding: 11px 12px;
+  text-align: left;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+/* 卡片头：名称 + 标签一行，字号与 .task-top 一致 */
+.unit-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 7px;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.unit-card-head b {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.unit-card-head .spacer {
+  flex: 1;
+}
+
+/* SSH / Database 的配置卡片：与设置页 .section 同观感——标题行带分隔线，一行一张铺满 */
+.ssh-connection-card,
+.db-card {
+  padding: 14px 18px 16px;
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.ssh-connection-card > .unit-card-head,
+.db-card > .unit-card-head {
+  margin-bottom: 2px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ssh-connection-card > .unit-card-head b,
+.db-card > .unit-card-head b {
+  font-size: 14px;
+  font-weight: 650;
+}
+
 .row {
   display: flex;
   gap: 8px;
@@ -516,13 +581,14 @@ button:focus-visible {
 .settings-toast {
   position: fixed;
   top: 68px;
-  right: 24px;
+  /* 设置类页面右侧会话栏常驻，浮层让开那一栏 */
+  right: calc(318px + 16px);
   z-index: 1000;
   display: flex;
   align-items: flex-start;
   gap: 12px;
   width: max-content;
-  max-width: min(480px, calc(100vw - 48px));
+  max-width: min(480px, calc(100vw - 318px - 64px));
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: 9px;
@@ -707,6 +773,22 @@ button.danger:hover:not(:disabled) {
   min-width: 0;
 }
 
+/* 权限下拉本身只显示选项文案，容易被当成别的下拉，行内给一个显式名称 */
+.permission-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+}
+
+.permission-cell .cell-label {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 .danger-select {
   color: var(--err);
   border-color: color-mix(in srgb, var(--err) 55%, var(--border));
@@ -885,29 +967,14 @@ button.cli-test.ok {
   padding: 22px 24px 26px;
 }
 
+/* 右侧会话栏常驻，正文不再按「有没有任务」换宽度 */
 .launch-body > * {
-  max-width: 1000px;
+  max-width: 720px;
   margin-left: auto;
   margin-right: auto;
 }
 
-.launch-split {
-  grid-area: 1 / 2 / 2 / 3;
-  display: flex;
-  min-height: 0;
-}
-
-.launch-split .launch-body {
-  flex: 1;
-  min-width: 0;
-  padding: 22px 18px 26px 24px;
-}
-
-.launch.with-tasks .launch-body > * {
-  max-width: 720px;
-}
-
-.launch-tasks {
+.side-rail {
   flex: 0 0 318px;
   min-width: 260px;
   display: flex;
@@ -917,6 +984,11 @@ button.cli-test.ok {
   overflow-y: auto;
   border-left: 1px solid var(--border);
   background: var(--bg-rail);
+}
+
+.side-rail > .ssh-rail-todo {
+  align-self: flex-start;
+  margin-bottom: -4px;
 }
 
 .tasks-head h2 {
@@ -976,7 +1048,7 @@ button.cli-test.ok {
   color: var(--text-dim);
 }
 
-.launch-tasks .dim {
+.side-rail .dim {
   color: var(--text-dim);
 }
 
@@ -1682,8 +1754,7 @@ button.link:hover:not(:disabled) {
 
 /* 浏览器式标签栏：常驻工作台最上方，同时充当窗口标题栏（整条可拖动） */
 .wb-tabstrip {
-  flex: 0 0 auto;
-  height: 34px;
+  flex: 0 0 34px;
   display: flex;
   align-items: stretch;
   gap: 8px;
@@ -1809,6 +1880,16 @@ button.link:hover:not(:disabled) {
   white-space: nowrap;
   text-overflow: ellipsis;
   font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 3px 0;
+}
+
+.wb-tab-text > * {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .wb-tab-text b {
@@ -1884,22 +1965,7 @@ button.link:hover:not(:disabled) {
   color: var(--text);
 }
 
-/* «←» / «＋» / 终端图标：平时隐形，鼠标进页卡栏才显形（键盘 Tab 聚焦也显形） */
-.wb-back,
-.wb-newtab,
-.wb-term {
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
-
-.wb-tabstrip:hover .wb-back,
-.wb-tabstrip:hover .wb-newtab,
-.wb-tabstrip:hover .wb-term,
-.wb-back:focus-visible,
-.wb-newtab:focus-visible,
-.wb-term:focus-visible {
-  opacity: 1;
-}
+/* «←» / «＋» / 终端图标常驻显示：鼠标移入只提亮颜色（见上面的 :hover 规则） */
 
 /* ---------- 顶部「终端」按钮：鼠标移入向下弹三种 Shell ---------- */
 .term-menu {
@@ -2109,6 +2175,8 @@ button.link:hover:not(:disabled) {
   flex: 1;
   display: flex;
   min-height: 0;
+  /* 平铺时右栏会靠 min-width 向左挤过来，这里兜住，不让整页冒出横向滚动 */
+  overflow: hidden;
   background: var(--term-bg);
 }
 
@@ -2249,9 +2317,6 @@ button.link:hover:not(:disabled) {
 
 .status-cli {
   flex: 0 0 auto;
-  padding: 1px 5px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
   color: var(--text);
 }
 
@@ -2307,12 +2372,17 @@ button.link:hover:not(:disabled) {
   background: var(--term-bg);
 }
 
+/* 平铺 = 右栏内左右并排；每格最小 150px（内联样式给的 min-width），
+   排不下时靠 .wb-side 的 min-width 把主终端往左挤，绝不出现横向滚动条 */
 .wb-side.tile {
-  /* 平铺 = 右栏内左右并排；右栏放不下时横向滚动，绝不换行成单列竖排 */
   flex-direction: row;
   flex-wrap: nowrap;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: hidden;
+}
+
+/* 平铺时主终端保留的最小宽度：右栏要挤也只能挤到这条线为止（数值需与 TILE_MIN_W 一起看） */
+.wb-body.tile .wb-main {
+  min-width: 240px;
 }
 
 .wb-side.tile .reviewer-panel {
@@ -2376,8 +2446,7 @@ button.link:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text);
 }
-/* 有已最小化的就用强调色点亮（与便签入口同口径） */
-.child-clis-trigger.has { color: var(--accent); }
+/* 子 CLI 入口不再按状态点亮强调色，常态就是灰色 */
 .child-clis-count { font-variant-numeric: tabular-nums; }
 
 .child-clis-pop {
@@ -2431,6 +2500,20 @@ button.link:hover:not(:disabled) {
   color: var(--text-dim);
   font-size: 11px;
 }
+/* 子 CLI 条目上的运行权限：小字标，高危标红，文案过长省略（完整说明在 title） */
+.child-clis-perm {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 7em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.child-clis-perm.dangerous {
+  color: var(--err);
+}
 .child-clis-item.done .child-clis-phase { color: var(--ok); }
 .child-clis-item.error .child-clis-phase { color: var(--danger); }
 .child-clis-tag {
@@ -2469,6 +2552,25 @@ button.link:hover:not(:disabled) {
   display: inline-flex;
   align-items: center;
   margin-left: 8px;
+}
+
+/* 入口之间拉一条竖线。线画在元素外侧的空白里（绝对定位，不占布局宽度），
+   这样它不会落进便签入口悬停时的胶囊底色；某个入口没内容时不渲染，
+   线跟着少一条，不会留下孤零零的分隔。 */
+.terminal-status-extra > * + * {
+  position: relative;
+  margin-left: 12px;
+}
+
+.terminal-status-extra > * + *::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  top: 50%;
+  width: 1px;
+  height: 12px;
+  margin-top: -6px;
+  background: var(--border);
 }
 
 /* Git 分支名：点击复制 */
@@ -2535,6 +2637,29 @@ button.link:hover:not(:disabled) {
 .output-trigger:hover {
   background: transparent;
   border-color: transparent;
+  color: var(--text-dim);
+}
+
+/* 状态栏图标入口的胶囊底（变更 / 输出共用）：图标 + 数字，整句说明挪进 title */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+}
+
+.status-pill:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.status-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.status-sep {
   color: var(--text-dim);
 }
 
@@ -2628,6 +2753,36 @@ button.link:hover:not(:disabled) {
   border-right: 1px solid var(--border);
 }
 
+.output-search {
+  position: sticky;
+  top: -6px;
+  z-index: 1;
+  margin: 0 0 6px;
+  padding: 6px 0 4px;
+  background: var(--bg-panel);
+}
+
+.output-search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.output-search input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.output-search-empty {
+  padding: 16px 8px;
+  text-align: center;
+}
+
 .output-item {
   display: flex;
   align-items: stretch;
@@ -2665,8 +2820,24 @@ button.link:hover:not(:disabled) {
 
 .output-list small { color: var(--text-dim); font-size: 11px; }
 
-.output-url-open {
+.output-src {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 4px;
+  font-style: normal;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-radius: 4px;
+  vertical-align: middle;
+}
+
+.output-row-act {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 24px;
   padding: 0;
   border: 0;
@@ -2679,7 +2850,7 @@ button.link:hover:not(:disabled) {
   border-radius: 4px;
 }
 
-.output-url-open:hover {
+.output-row-act:hover {
   background: var(--bg-hover);
   color: var(--accent);
 }
@@ -2698,6 +2869,26 @@ button.link:hover:not(:disabled) {
   max-height: 100%;
   margin: auto;
   object-fit: contain;
+}
+
+/* 可点击放大的图片 */
+.output-zoomable {
+  cursor: zoom-in;
+}
+
+/* 点开的图片铺满整窗；z-index 高于确认弹窗的 1300，保证不会被任何层盖住。
+   必须是 flex 而不是 grid：grid 行内按百分比解析 max-height 会因循环依赖失效，
+   大图会溢出一圈被裁掉。 */
+.image-zoom {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.72);
+  cursor: zoom-out;
 }
 
 .output-preview pre {
@@ -3103,10 +3294,7 @@ button.link:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--text);
 }
-/* 有条数就用强调色把图标点亮，不再用边框（边框在 24px 高的状态栏里太吵） */
-.notes-trigger.has {
-  color: var(--accent);
-}
+/* 便签入口不再按条数点亮强调色，常态就是灰色 */
 .notes-count {
   font-variant-numeric: tabular-nums;
 }
@@ -3383,29 +3571,6 @@ body.notes-dragging-h {
   color: var(--text-dim);
   font-size: 11px;
   white-space: nowrap;
-}
-/* 状态标签：点一下循环切换（未处理 → 进行中 → 已完成），着色与标题同口径 */
-.note-status {
-  flex: 0 0 auto;
-  padding: 0 5px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 10px;
-  line-height: 15px;
-  cursor: pointer;
-}
-.note-status:hover {
-  border-color: currentColor;
-}
-.note-status.doing {
-  border-color: var(--note-doing);
-  color: var(--note-doing);
-}
-.note-status.done {
-  border-color: var(--note-done);
-  color: var(--note-done);
 }
 .note-actions {
   flex: 0 0 auto;
@@ -3690,4 +3855,74 @@ body.notes-dragging-h {
   flex: 0 0 auto;
   font-size: 11px;
   padding: 2px 7px;
+}
+
+/* 崩溃兜底卡片：某一块渲染抛异常时替换该块，避免整窗白屏 */
+.crash-card {
+  margin: 24px;
+  padding: 18px 20px;
+  border: 1px solid var(--err);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 13px;
+}
+.crash-card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  color: var(--err);
+}
+.crash-msg {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.crash-stack {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  max-height: 150px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font: 12px/1.5 Consolas, 'Cascadia Mono', monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.crash-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---- 设置 · 版本与更新 ---- */
+.update-latest {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+}
+
+.update-progress {
+  flex: 1;
+  height: 6px;
+}
+
+/* Release 正文当作不可信纯文本展示：不渲染 Markdown，也不放行长单词撑破布局 */
+.update-notes {
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font: 12px/1.6 inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
 }

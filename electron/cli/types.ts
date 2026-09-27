@@ -112,6 +112,11 @@ export interface CliAdapter {
    * 模型为空表示测 CLI 自己的默认模型；实现里不要带任何权限参数。
    */
   testArgs?: (bin: string, model: string) => string[]
+  /**
+   * spawn 前要合并进子进程环境的额外变量（异步：端口这类要现探测的资源在这里取）。
+   * 由终端统一合并，通用层不出现具体 CLI 的判断。
+   */
+  launchEnv?: () => Promise<Record<string, string>>
 
   /**
    * 预分配原生 session id 的参数片段，追加在 launchArgs 之后。

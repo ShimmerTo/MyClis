@@ -1,5 +1,6 @@
 import { homedir } from 'os'
 import { join } from 'path'
+import { reserveFreePort } from './portpool'
 import { MODEL_TEST_PROMPT } from './types'
 import type { CliAdapter, DeliveryProfile } from './types'
 import { asRecord, contentText, num, scanHead, stamp, str, toolLine } from './transcript'
@@ -59,6 +60,8 @@ export const codebuddyAdapter: CliAdapter = {
   skillTargets: () => [{ kind: 'skills', dir: join(HOME, '.codebuddy', 'skills') }],
   // codebuddy 没有列模型的子命令（只有 --help 里那句「Currently supported」），模型名照旧手输
   testArgs: (bin, model) => [bin, '-p', ...(model ? ['--model', model] : []), MODEL_TEST_PROMPT],
+  // 每个实例都要独占一个 web-ui 端口，撞了就静默挂死；设了 SERVER__PORT 它就不读自己的池文件
+  launchEnv: async () => ({ SERVER__PORT: String(await reserveFreePort()) }),
   // <id>/subagents/agent-x.jsonl 是子代理的分叉，不属于本页要展示的主会话
   sessionScanDepth: 2,
   sessionRoot: () => join(HOME, '.codebuddy', 'projects'),

@@ -1,6 +1,7 @@
 import { createServer } from 'http'
 import type { IncomingMessage, Server, ServerResponse } from 'http'
 import type {
+  ChildControlEntry,
   PresentRequest,
   RetryResponse,
   RunSnapshot,
@@ -23,6 +24,11 @@ export interface BridgeHandlers {
   onRunStatus: RunStatusHandler
   onRunWait: RunWaitHandler
   onRunRetry: RunRetryHandler
+  onChildren?: (sessionId: string) => ChildControlEntry[]
+  onChildResume?: (sessionId: string, termId: string) => Promise<{ termId: string }>
+  onChildApproval?: (sessionId: string, termId: string, approvalId: string, option: string) => void
+  onSsh?: (req: IncomingMessage, res: ServerResponse) => Promise<void>
+  onDatabase?: (req: IncomingMessage, res: ServerResponse) => Promise<void>
 }
 
 /** 子任务监督路由：全部是 GET + 路径参数，主 CLI 的 curl 不需要引号与 query 拼接 */
@@ -49,7 +55,11 @@ function normalizeTargets(raw: unknown): TriggerTarget[] | undefined {
     const documents = Array.isArray(record.documents)
       ? record.documents.filter((p): p is string => typeof p === 'string' && !!p.trim())
       : undefined
-    return { profileId, task, documents }
+    const resumeTermId = typeof record.resumeTermId === 'string' ? record.resumeTermId.trim() : undefined
+    if ('resumeTermId' in record && (!resumeTermId || !/^[A-Za-z0-9_-]{1,64}$/.test(resumeTermId))) {
+      throw new Error('resumeTermId 必须是历史子 CLI 列表中的终端标识')
+    }
+    return { profileId, task, documents, resumeTermId }
   })
 }
 
@@ -75,6 +85,18 @@ export function startBridge(handlers: BridgeHandlers): Promise<number> {
 async function doStart(handlers: BridgeHandlers): Promise<number> {
   const current = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if ((url.pathname === '/ssh/v1' || url.pathname.startsWith('/ssh/v1/')) && handlers.onSsh) {
+      void handlers.onSsh(req, res).catch(() => {
+        sendJson(res, 500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'SSH 服务暂时不可用' } })
+      })
+      return
+    }
+    if ((url.pathname === '/database/v1' || url.pathname.startsWith('/database/v1/')) && handlers.onDatabase) {
+      void handlers.onDatabase(req, res).catch(() => {
+        sendJson(res, 500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'Database 服务暂时不可用' } })
+      })
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/status') {
       sendJson(res, 200, { ok: true })
       return
@@ -106,6 +128,41 @@ async function doStart(handlers: BridgeHandlers): Promise<number> {
       })()
       return
     }
+    const child = /^\/children\/([A-Za-z0-9_-]{1,64})(?:\/([A-Za-z0-9_-]{1,64})\/(resume|approval))?$/.exec(url.pathname)
+    if (child) {
+      if (req.headers.origin || req.headers['sec-fetch-site']) {
+        sendJson(res, 403, { ok: false, error: '子 CLI 控制不接受网页请求' })
+        return
+      }
+      const [, sessionId, termId, action] = child
+      if (req.method === 'GET' && !action && handlers.onChildren) {
+        try {
+          sendJson(res, 200, { ok: true, session: sessionId, children: handlers.onChildren(sessionId) })
+        } catch (error) {
+          sendJson(res, 400, { ok: false, error: message(error) })
+        }
+        return
+      }
+      if (req.method === 'POST' && action === 'resume' && handlers.onChildResume) {
+        readBody(req, res, () => handlers.onChildResume!(sessionId, termId))
+        return
+      }
+      if (req.method === 'POST' && action === 'approval' && handlers.onChildApproval) {
+        readBody(req, res, async (body) => {
+          const parsed: unknown = JSON.parse(body)
+          if (!parsed || typeof parsed !== 'object') throw new Error('审批请求必须是对象')
+          const { approvalId, option } = parsed as Record<string, unknown>
+          if (typeof approvalId !== 'string' || typeof option !== 'string' || !/^[1-9]$/.test(option)) {
+            throw new Error('审批请求需要当前 approvalId 和菜单中的 option')
+          }
+          handlers.onChildApproval!(sessionId, termId, approvalId, option)
+          return { submitted: true }
+        })
+        return
+      }
+      sendJson(res, 405, { ok: false, error: '不支持的子 CLI 控制请求' })
+      return
+    }
     const present = req.method === 'POST' ? PRESENT_ROUTE.exec(url.pathname) : null
     if (present && handlers.onPresent) {
       const session = present[1]
@@ -128,8 +185,12 @@ async function doStart(handlers: BridgeHandlers): Promise<number> {
       })
       return
     }
-    const m = url.pathname.match(/^\/trigger\/(design|write|review)$/)
+    const m = url.pathname.match(/^\/trigger\/(design|write|review|custom)$/)
     if (req.method === 'POST' && m) {
+      if (m[1] === 'custom' && (req.headers.origin || req.headers['sec-fetch-site'])) {
+        sendJson(res, 403, { ok: false, error: '自定义命令调度不接受网页请求' })
+        return
+      }
       readBody(req, res, async (body) => {
         const parsed = body ? (JSON.parse(body) as Partial<TriggerRequest> & { targets?: unknown }) : {}
         const session = typeof parsed.session === 'string' ? parsed.session.trim() : ''
@@ -137,11 +198,14 @@ async function doStart(handlers: BridgeHandlers): Promise<number> {
           query: String(parsed.query ?? ''),
           workDir: String(parsed.workDir ?? ''),
           session: session || undefined,
+          commandId: typeof parsed.commandId === 'string' ? parsed.commandId.trim() : undefined,
           documentPath: String(parsed.documentPath ?? ''),
           targets: normalizeTargets(parsed.targets)
         }
         if (!request.workDir.trim()) throw new Error('缺少 workDir')
         if (!request.documentPath.trim()) throw new Error('缺少 documentPath')
+        if (m[1] === 'custom' && !request.commandId) throw new Error('自定义命令缺少 commandId')
+        if (m[1] === 'custom' && !request.targets?.length) throw new Error('自定义命令必须提供非空 targets 和任务指令')
         return handlers.onTrigger(m[1] as TriggerKind, request)
       })
       return

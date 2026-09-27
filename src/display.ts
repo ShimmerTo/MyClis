@@ -28,3 +28,28 @@ export const outputState = (lastOutputAt: number): string => {
 /** 系统终端的显示名（PowerShell / CMD / Git Bash） */
 export const shellLabel = (kind: TerminalKind): string =>
   TERMINALS.find((t) => t.id === kind)?.label ?? kind
+
+/** 回落首问时的截取长度：侧栏一栏放不下整条问题 */
+const TASK_NAME_MAX = 30
+
+export interface TaskName {
+  text: string
+  /** 名字来自首问截断，卡片下方就不再重复整条首问 */
+  fromQuery: boolean
+}
+
+/** 卡片标题的任务名：CLI 自己起的会话标题优先，其次截首问首个非空行，都没有才用目录名 */
+export const taskName = (
+  title: string | undefined,
+  initialQuery: string | undefined,
+  fallback: string
+): TaskName => {
+  const native = title?.split('\n').map((l) => l.trim()).find((l) => l)
+  if (native) return { text: native, fromQuery: false }
+  const query = (initialQuery ?? '').split('\n').map((l) => l.trim()).find((l) => l) ?? ''
+  if (!query) return { text: fallback, fromQuery: false }
+  return {
+    text: query.length > TASK_NAME_MAX ? `${query.slice(0, TASK_NAME_MAX)}…` : query,
+    fromQuery: true
+  }
+}

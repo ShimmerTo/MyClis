@@ -13,6 +13,7 @@ files:
   - '!**/*.map'
 # node-pty 的 win32 原生二进制不能进 asar
 asarUnpack:
+  - 'out/main/notes-selection.exe'
   - '**/node_modules/@lydell/node-pty/**'
   - '**/node_modules/@lydell/node-pty-win32-x64/**'
 win:
@@ -20,12 +21,9 @@ win:
   icon: build/icon.ico
   target:
     - nsis
-    - portable
   artifactName: ${productName}-setup-${version}.${ext}
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   shortcutName: myclis
-portable:
-  artifactName: ${productName}-portable-${version}.${ext}

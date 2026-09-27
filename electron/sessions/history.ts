@@ -1,4 +1,4 @@
-import { app } from 'electron'
+import { getDataDirectory } from '../config/dataDirectory'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { CH } from '../../shared/types'
@@ -8,7 +8,7 @@ import type { HistoryChild, HistoryRecord, TerminalInfo } from '../../shared/typ
 const KEEP = 300
 
 function historyPath(): string {
-  return join(app.getPath('userData'), 'clichilds', 'history.json')
+  return join(getDataDirectory(), 'history.json')
 }
 
 type Emitter = (channel: string, payload: unknown) => void
@@ -93,6 +93,7 @@ export class HistoryStore {
       this.items.unshift({
         ...prior,
         sessionId: info.id,
+        workspaceSessionId: info.workspaceSessionId ?? prior.workspaceSessionId ?? prior.sessionId,
         profileId: info.profileId,
         profileLabel: info.profileLabel,
         model: info.model,
@@ -105,6 +106,7 @@ export class HistoryStore {
     } else {
       this.items.unshift({
         sessionId: info.id,
+        workspaceSessionId: info.workspaceSessionId,
         nativeSessionId: info.nativeSessionId,
         cli: info.cli,
         profileId: info.profileId,

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { createPortal } from 'react-dom'
+import { DEFAULT_NOTES_DIR } from '@shared/types'
 import type { NoteKind } from '@shared/types'
 import { dirBase } from '../notes'
 import { toast } from './ToastHost'
@@ -64,8 +65,11 @@ export function useNoteMenu(config: NoteMenuConfig): {
   const onContextMenu = useCallback(
     (event: ReactMouseEvent<HTMLElement>) => {
       if (target) {
+        const selection = window.getSelection()
+        const text = selection && event.currentTarget.contains(selection.anchorNode) && event.currentTarget.contains(selection.focusNode)
+          ? selection.toString() : ''
         event.preventDefault()
-        setState({ x: event.clientX, y: event.clientY, text: '' })
+        setState({ x: event.clientX, y: event.clientY, text })
         return
       }
       // 选区为空时不拦：把默认右键菜单还给用户
@@ -103,19 +107,20 @@ export function useNoteMenu(config: NoteMenuConfig): {
     return ''
   }
 
-  const addNote = async (): Promise<void> => {
-    if (!workDir) {
+  const addNote = async (destination = workDir, selectedText = false): Promise<void> => {
+    if (!destination) {
       toast('没有可归属的工作目录，无法加入便签')
       return
     }
     try {
-      const content = await valueOf()
+      const content = selectedText ? state?.text ?? '' : await valueOf()
       if (!content.trim()) return
       const note = await window.clichilds.notesAdd({
-        workDir,
-        kind: target ? target.kind : 'text',
+        workDir: destination,
+        kind: selectedText ? 'text' : target ? target.kind : 'text',
         content
       })
+      setState(null)
       // 带上目录名：子终端、reviewer 面板里加入的便签归属的是主会话的目录，不写清楚会以为放错了
       toast(`已加入便签（${dirBase(note.workDir)}）：${note.title}`)
     } catch (error) {
@@ -147,8 +152,9 @@ export function useNoteMenu(config: NoteMenuConfig): {
               {selectionCopyLabel}
             </button>
           ) : null}
+          {state.text.trim() && <button type="button" onClick={() => void addNote(DEFAULT_NOTES_DIR, true)}>存储到便签</button>}
           <button type="button" onClick={() => void addNote()} disabled={!workDir}>
-            加入便签
+            {target ? '加入便签' : '加入当前目录便签'}
           </button>
         </div>,
         document.body

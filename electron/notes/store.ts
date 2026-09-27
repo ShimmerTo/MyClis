@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
-import { basename, isAbsolute, join, relative, resolve } from 'path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
+import { basename, isAbsolute, join, resolve } from 'path'
 import { CH, NOTE_STATUSES } from '../../shared/types'
 import type { Note, NoteKind, NoteStatus } from '../../shared/types'
 import { NOTE_SPLIT_RE, noteFileStem, noteSplitNames, notesBaseDir, notesPath } from './paths'
@@ -63,13 +63,17 @@ function toNote(raw: unknown): Note | null {
     title: (given || defaultTitle(kind, content)).slice(0, MAX_TITLE),
     // 旧数据没有 status：一律按「未处理」归位
     status: NOTE_STATUSES.includes(item.status as NoteStatus) ? (item.status as NoteStatus) : 'todo',
+    order: Number.isFinite(item.order) ? item.order : undefined,
+    execution: item.execution && typeof item.execution.workspaceSessionId === 'string' &&
+      typeof item.execution.profileId === 'string' && ['codex', 'qoder', 'codebuddy', 'pi'].includes(item.execution.cli)
+      ? { ...item.execution } : undefined,
     createdAt,
     updatedAt
   }
 }
 
 /**
- * 便签：跨重启保留在存储目录（默认 userData/clichilds，可在设置里改）下，
+ * 便签：跨重启保留在全局数据目录下，
  * 按工作目录拆分存储 —— 每个目录两个文件：非已完成一份、已完成一份
  * （文件名规则见 paths.ts 的 noteFileStem / noteSplitNames）。
  * 旧版单文件 notes.json 仍可读：只要还没有拆分的目录文件，就整表读它，首次落盘自动完成拆分。
@@ -131,7 +135,57 @@ export class NotesStore {
   /** 最新加入的在前 */
   list(): Note[] {
     this.ensure()
-    return this.items.map((item) => ({ ...item }))
+    return this.items.map((item) => ({ ...item })).sort((a, b) => (a.order ?? -a.createdAt) - (b.order ?? -b.createdAt))
+  }
+
+  validateSelection(workDir: string, ids: string[], allowCrossDir = false): Note[] {
+    const selected = this.validateIds(ids)
+    if (allowCrossDir) {
+      if (selected.some((note) => note.status !== 'todo')) throw new Error('只能发送未处理的便签，请重新选择')
+      return selected
+    }
+    if (selected.some((note) => resolve(note.workDir).toLowerCase() !== resolve(workDir).toLowerCase())) {
+      throw new Error('便签不存在或不属于当前目录')
+    }
+    return selected
+  }
+
+  validateIds(ids: string[]): Note[] {
+    this.ensure()
+    if (!Array.isArray(ids) || ids.length > KEEP || new Set(ids).size !== ids.length) throw new Error('便签选择无效')
+    return ids.map((id) => {
+      const note = this.items.find((item) => item.id === id)
+      if (!note) throw new Error('便签不存在')
+      return note
+    })
+  }
+
+  /** 把便签绑到一次执行，同时把状态置为进行中：交给 CLI 跑就不再是「未处理」了。 */
+  bindExecution(ids: string[], execution: NonNullable<Note['execution']>): void {
+    this.ensure()
+    this.commit(this.items.map((item) => ids.includes(item.id) ? { ...item, status: 'doing' as const, execution: { ...execution } } : item))
+  }
+
+  reorder(workDir: string, ids: string[]): void {
+    const selected = this.validateSelection(workDir, ids)
+    if (selected.length < 2) return
+    const ordered = this.list().filter((item) => resolve(item.workDir).toLowerCase() === resolve(workDir).toLowerCase())
+    let index = 0
+    const ranks = new Map(ordered.map((item, position) => [ids.includes(item.id) ? selected[index++].id : item.id, position]))
+    this.commit(this.items.map((item) => ranks.has(item.id) ? { ...item, order: ranks.get(item.id) } : item))
+  }
+
+  private commit(next: Note[]): void {
+    const dir = notesBaseDir()
+    try {
+      mkdirSync(dir, { recursive: true })
+      writeSplitFiles(dir, next)
+    } catch (error) {
+      console.error('保存便签失败', error)
+      throw new Error('保存便签失败，请检查存储目录权限与磁盘空间')
+    }
+    this.items = next
+    this.emit(CH.notesChanged, this.list())
   }
 
   /**
@@ -166,12 +220,11 @@ export class NotesStore {
       content,
       title: this.titleOf(input.title, kind, content),
       status: 'todo',
+      order: Math.min(-now, ...this.items.filter((item) => resolve(item.workDir).toLowerCase() === resolve(workDir).toLowerCase()).map((item) => item.order ?? -item.createdAt)) - 1,
       createdAt: now,
       updatedAt: now
     }
-    this.items.unshift(note)
-    if (this.items.length > KEEP) this.items.length = KEEP
-    this.flush()
+    this.commit([note, ...this.items].slice(0, KEEP))
     return { ...note }
   }
 
@@ -181,8 +234,9 @@ export class NotesStore {
    */
   update(input: { id: string; title?: string; content?: string; status?: NoteStatus }): void {
     this.ensure()
-    const note = this.items.find((item) => item.id === input.id)
-    if (!note) return
+    const original = this.items.find((item) => item.id === input.id)
+    if (!original) throw new Error('便签已不存在')
+    const note = { ...original }
     if (typeof input.content === 'string') {
       const content = (note.kind === 'text' ? sanitizeNoteText(input.content) : input.content.trim()).slice(
         0,
@@ -198,97 +252,31 @@ export class NotesStore {
       note.status = input.status as NoteStatus
     }
     note.updatedAt = Date.now()
-    this.flush()
+    this.commit(this.items.map((item) => item.id === note.id ? note : item))
   }
 
   remove(id: string): void {
     this.ensure()
-    const before = this.items.length
-    this.items = this.items.filter((item) => item.id !== id)
-    if (this.items.length !== before) this.flush()
+    const next = this.items.filter((item) => item.id !== id)
+    if (next.length !== this.items.length) this.commit(next)
   }
 
   /** 不带 workDir = 清全部（管理页），带上 = 只清该工作目录（浮窗） */
   clear(workDir?: string): void {
     this.ensure()
     const target = workDir?.trim()
-    const next = target ? this.items.filter((item) => item.workDir !== target) : []
+    if (workDir !== undefined && !target) throw new Error('请指定要清除便签的工作目录')
+    const next = target ? this.items.filter((item) => resolve(item.workDir).toLowerCase() !== resolve(target).toLowerCase()) : []
     if (next.length === this.items.length) return
     // 清除不可逆（跨目录、无回收站），先留一份可人工恢复的备份
     this.backup()
-    this.items = next
-    this.flush()
+    this.commit(next)
   }
 
   /** 标题：给了就用给的（截断），否则按类型兜底 */
   private titleOf(title: string | undefined, kind: NoteKind, content: string): string {
     const given = sanitizeNoteText(title ?? '').replace(/\s+/g, ' ').trim()
     return (given || defaultTitle(kind, content)).slice(0, MAX_TITLE)
-  }
-
-  /**
-   * 切换便签存储目录：把便签数据（拆分文件；没有拆分文件时是旧版 notes.json）与 notes-assets/
-   * 整体搬到新目录，指向旧资产目录的文件类便签同步改写成新路径（图片粘贴后落的就是这个目录，不改写会全部变成死链接）。
-   *
-   * 分寸：
-   *  - 目标目录里已经有便签数据（notes.json 或任一拆分文件）时直接拒绝 —— 迁移会覆盖它们，
-   *    宁可让用户换目录或先自行处理。
-   *  - 先写好新文件、再动旧文件：任一步失败都不会「两边都没有」；旧 notes.json 退成 notes.json.bak，
-   *    与清除操作的备份口径一致，迁移完还能人工找回；旧拆分文件删掉，避免将来换回旧目录时读到过期数据。
-   *  - 配置写回（storageDir）由调用方在成功后进行，失败时配置仍指向旧目录、数据也还在旧目录。
-   */
-  setStorage(target: string): void {
-    this.ensure()
-    if (!target.trim()) throw new Error('便签存储目录不能为空')
-    if (!isAbsolute(target.trim())) throw new Error('便签存储目录必须是绝对路径')
-    const oldBase = notesBaseDir()
-    const dir = resolve(target.trim())
-    if (dir.replace(/[\\/]+$/, '').toLowerCase() === oldBase.replace(/[\\/]+$/, '').toLowerCase()) return
-    let targetHasNotes = existsSync(join(dir, 'notes.json'))
-    try {
-      targetHasNotes = targetHasNotes || (existsSync(dir) && readdirSync(dir).some((f) => NOTE_SPLIT_RE.test(f)))
-    } catch (err) {
-      console.error('检查便签目标目录失败', err)
-    }
-    if (targetHasNotes) {
-      throw new Error(`目标目录里已有便签数据，请换一个目录：${dir}`)
-    }
-    mkdirSync(dir, { recursive: true })
-
-    const oldAssets = join(oldBase, 'notes-assets')
-    const newAssets = join(dir, 'notes-assets')
-    if (existsSync(oldAssets)) moveDir(oldAssets, newAssets)
-
-    // 指向旧资产目录的文件类便签改写成新路径；不在旧目录下的便签不动
-    for (const note of this.items) {
-      if (note.kind !== 'file') continue
-      const rel = relative(oldAssets, note.content)
-      if (!rel || rel.startsWith('..') || isAbsolute(rel)) continue
-      note.content = join(newAssets, rel)
-    }
-
-    // 新目录按拆分格式落盘；此刻 notesBaseDir() 仍是旧目录（配置还没写回），所以显式传 dir
-    writeSplitFiles(dir, this.items)
-
-    const oldNotes = notesPath()
-    try {
-      if (existsSync(oldNotes)) renameSync(oldNotes, `${oldNotes}.bak`)
-    } catch (err) {
-      // 旧文件退备份失败不影响迁移结果，留着旧文件也只是多一份冗余
-      console.error('便签迁移后处理旧文件失败', err)
-    }
-    try {
-      for (const file of readdirSync(oldBase)) {
-        if (NOTE_SPLIT_RE.test(file)) rmSync(join(oldBase, file), { force: true })
-      }
-    } catch (err) {
-      console.error('便签迁移后清理旧拆分文件失败', err)
-    }
-
-    // 不重载内存：配置写回由调用方随后进行，此刻 notesPath()/notesBaseDir() 还指向旧目录，
-    // 重载会读到刚被改名或清空的旧数据、把内存清空，界面从此显示为「无便签」。
-    // 内存里的 items 与刚写出的新拆分文件完全一致，直接用即可。
-    this.emit(CH.notesChanged, this.list())
   }
 
   private backup(): void {
@@ -298,19 +286,10 @@ export class NotesStore {
       writeFileSync(`${p}.bak`, JSON.stringify(this.items, null, 2), 'utf-8')
     } catch (err) {
       console.error('写入便签备份失败', err)
+      throw new Error('备份便签失败，未执行清除；请检查存储目录权限与磁盘空间')
     }
   }
 
-  private flush(): void {
-    const dir = notesBaseDir()
-    try {
-      mkdirSync(dir, { recursive: true })
-      writeSplitFiles(dir, this.items)
-    } catch (err) {
-      console.error('写入便签失败', err)
-    }
-    this.emit(CH.notesChanged, this.list())
-  }
 }
 
 /**
@@ -352,19 +331,4 @@ function writeSplitFile(path: string, items: Note[]): void {
   const tmp = `${path}.tmp`
   writeFileSync(tmp, JSON.stringify(items, null, 2), 'utf-8')
   renameSync(tmp, path)
-}
-
-/**
- * 移动目录：同盘符走 rename（瞬间完成），跨盘符或目标已存在时退化成「递归拷贝 + 删源」。
- * 拷贝是并入而不是先清空目标 —— 目标里若已有 notes-assets/（上一次用过这个目录），
- * 资产名带时间戳与随机串、撞名只会是同一份文件，不需要也不该删用户目录里的东西。
- */
-function moveDir(from: string, to: string): void {
-  try {
-    renameSync(from, to)
-    return
-  } catch {
-    cpSync(from, to, { recursive: true })
-    rmSync(from, { recursive: true, force: true })
-  }
 }

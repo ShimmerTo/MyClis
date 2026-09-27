@@ -1,0 +1,119 @@
+/* 页面顶部标题行：标题在左，审批记录入口与操作按钮在右 */
+.db-head { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.db-head-title { min-width: 0; }
+.db-head h1 { margin: 0; font-size: 21px; letter-spacing: .2px; }
+.db-head .sub { margin: 5px 0 0; color: var(--text-dim); font-size: 13px; }
+.db-head .spacer { flex: 1; }
+.db-head > button, .db-head > label { align-self: center; }
+.db-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.db-card { font-size: 13px; }
+.db-card p { margin: 0; overflow-wrap: anywhere; }
+.db-card .db-actions { margin-top: auto; }
+.db-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.db-form { border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.db-form > label { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.db-wide { grid-column: 1 / -1; }
+.db-form input:not([type=checkbox]), .db-form select, .db-form textarea { width: 100%; box-sizing: border-box; }
+.db-form textarea { resize: vertical; min-height: 88px; }
+.db-check, .db-form > .db-check { display: flex; flex-direction: row; align-items: center; gap: 7px; }
+.db-projects { display: flex; flex-wrap: wrap; gap: 8px 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.db-projects label { max-width: 100%; overflow-wrap: anywhere; }
+.db-success { color: var(--ok); }
+/* 连接与查询进行中的转圈指示，与 SSH 测试连接同口径 */
+.db-spinner { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -2px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: db-spin .7s linear infinite; }
+@keyframes db-spin { to { transform: rotate(360deg); } }
+.db-status-trigger { -webkit-app-region: no-drag; white-space: nowrap; }
+.db-connections-modal .approval-dialog { width: min(580px, 94vw); }
+.db-connections-modal .approval-dialog-body > .path { margin: 0 0 14px; overflow-wrap: anywhere; }
+.db-history-trigger { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px; font-size: 12px; color: var(--text-dim); }
+.db-history-trigger svg { flex: none; }
+.db-history-trigger strong { color: var(--warn); font-weight: 600; }
+.db-history-modal .approval-dialog { width: min(980px, 96vw); max-height: min(760px, calc(100dvh - 48px)); }
+.db-history { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(0, 1.2fr); gap: 12px; align-items: start; font-size: 13px; }
+.db-history-row { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; height: auto; margin: 0; padding: 9px 10px; text-align: left; white-space: normal; overflow-wrap: anywhere; border-radius: 8px; }
+.db-history-row.on { border-color: var(--accent); }
+.db-history-row span { color: var(--text-dim); font-size: 12px; }
+.db-history-sql { font-family: Consolas, monospace; }
+.db-history-list { display: flex; flex-direction: column; gap: 7px; max-height: 620px; overflow: auto; min-width: 0; }
+.db-history-detail { min-width: 0; max-height: 620px; overflow: auto; border-left: 3px solid var(--border); padding-left: 12px; }
+.db-history-detail p { margin: 5px 0; overflow-wrap: anywhere; }
+.db-history-detail h4 { margin: 12px 0 5px; font-size: 12px; color: var(--text-dim); font-weight: 600; }
+.db-history-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 Consolas, monospace; background: var(--bg-input); border: 1px solid var(--border); padding: 10px; border-radius: 5px; max-height: 220px; overflow: auto; user-select: text; unicode-bidi: plaintext; margin: 0; }
+@media (max-width: 1100px) { .db-history { grid-template-columns: minmax(0, 1fr); } }
+
+.db-manager { min-width: 0; }
+.db-manager-header, .db-manager-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.db-manager-header { padding: 12px 0; }
+.db-manager-header h2 { font-size: 17px; margin: 0; }
+.db-manager-header p { margin: 4px 0 0; overflow-wrap: anywhere; }
+.db-manager .spacer { flex: 1; }
+.db-cache-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.db-manager-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); min-height: 540px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
+.db-table-sidebar { min-width: 0; padding: 12px; border-right: 1px solid var(--border); }
+.db-table-sidebar input[type=search] { width: 100%; box-sizing: border-box; }
+.db-system-toggle { margin-top: 10px; font-size: 12px; cursor: pointer; }
+.db-system-toggle input { flex: none; }
+.db-table-sidebar > p { margin: 10px 0; }
+.db-table-sidebar nav { display: flex; flex-direction: column; gap: 5px; max-height: calc(100dvh - 350px); min-height: 320px; overflow: auto; }
+.db-schema-group { flex: none; min-width: 0; }
+.db-schema-toggle, .db-table-item { border: 0; border-radius: 3px; background: transparent; box-shadow: none; }
+.db-schema-toggle:hover:not(:disabled), .db-table-item:hover:not(:disabled) { background: var(--bg-hover); }
+.db-schema-toggle { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; height: auto; padding: 6px; text-align: left; white-space: normal; }
+.db-schema-toggle strong { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; font-weight: 600; }
+.db-schema-chevron, .db-schema-count, .db-schema-badge { flex: none; color: var(--text-dim); font-size: 11px; }
+.db-schema-chevron { width: 10px; }
+.db-schema-tables { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 6px 9px; padding-left: 8px; border-left: 1px solid var(--border); }
+.db-schema-toggle:focus-visible, .db-table-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.db-table-item { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; text-align: left; flex: none; width: 100%; padding: 6px 8px; height: auto; white-space: normal; overflow-wrap: anywhere; }
+.db-table-item strong { font-size: 13px; font-weight: 500; }
+.db-table-item span { color: var(--text-dim); font-size: 11px; }
+.db-table-item.on { color: var(--accent); background: var(--bg-hover); }
+.db-table-workspace { min-width: 0; padding: 14px; overflow: hidden; display: flex; flex-direction: column; }
+/* 选中表的类型与行数固定在右侧内容底部，树里只显示表名 */
+.db-table-meta { margin: auto 0 0; padding-top: 10px; border-top: 1px solid var(--border); }
+.db-manager-tabs { display: flex; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.db-manager-tabs button.on { color: var(--accent); border-color: var(--accent); }
+.db-selected-table { font-size: 14px; margin: 14px 0; overflow-wrap: anywhere; }
+.db-manager-toolbar { font-size: 12px; margin: 10px 0; }
+.db-manager-toolbar label { display: inline-flex; align-items: center; gap: 6px; }
+.db-manager-toolbar select { padding: 3px 6px; }
+.db-request-status { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 12px 0; font-size: 12px; }
+.db-data-grid { max-width: 100%; max-height: calc(100dvh - 420px); min-height: 100px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; user-select: text; }
+.db-data-grid table { min-width: 100%; border-collapse: separate; border-spacing: 0; font: 12px/1.5 Consolas, monospace; }
+.db-data-grid th { position: sticky; top: 0; background: var(--bg-input); z-index: 1; text-align: left; white-space: nowrap; padding: 8px 10px; }
+.db-data-grid th button { font: inherit; font-weight: 600; border: 0; padding: 0; height: auto; background: transparent; white-space: nowrap; }
+.db-data-grid td { padding: 6px 10px; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-top: 1px solid var(--border); }
+.db-data-grid td + td, .db-data-grid th + th { border-left: 1px solid var(--border); }
+.db-data-grid tbody tr:hover { background: var(--bg-input); }
+.db-data-grid .db-row-select { width: 32px; min-width: 32px; text-align: center; padding: 6px; }
+.db-row-select input[type=checkbox] { width: 14px; height: 14px; margin: 0; vertical-align: middle; accent-color: var(--accent); cursor: pointer; }
+.db-row-select input[type=checkbox]:disabled { cursor: default; }
+.db-row-select input[type=checkbox]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.db-row-actions > button { white-space: nowrap; }
+.db-row-feedback { margin: 6px 0; font-size: 12px; overflow-wrap: anywhere; }
+.db-null { color: var(--text-dim); font-style: italic; }
+.db-pagination { padding-top: 5px; }
+.db-data-pane .db-data-grid { max-height: max(140px, calc(100dvh - 550px)); }
+.db-sql-console > label { display: block; margin: 14px 0 7px; font-size: 12px; }
+.db-sql-editor { border: 1px solid var(--border); border-radius: 5px; background: var(--bg-input); color: var(--text); }
+.db-sql-editor .cm-editor { min-height: 180px; font: 13px/1.6 Consolas, monospace; }
+.db-sql-editor .cm-scroller { max-height: 360px; overflow: auto; font-family: inherit; }
+.db-sql-editor .cm-content { min-height: 180px; padding: 8px 0; caret-color: var(--text); }
+.db-sql-editor .cm-line { padding: 0 10px; }
+.db-sql-editor .cm-gutters { background: var(--bg); color: var(--text-dim); border-right: 1px solid var(--border); }
+.db-sql-editor .cm-focused { outline: 1px solid var(--accent); border-radius: 5px; }
+.db-sql-editor .cm-tooltip { border: 1px solid var(--border); background: var(--bg-input); color: var(--text); box-shadow: var(--shadow); }
+.db-sql-editor .cm-tooltip-autocomplete ul li[aria-selected] { background: var(--accent); color: var(--accent-text); }
+.db-sql-editor .cm-completionDetail { opacity: .8; font-style: normal; }
+.db-sql-editor.is-disabled { opacity: .7; }
+.db-definition pre { font: 12px/1.7 Consolas, monospace; white-space: pre; user-select: text; max-height: calc(100dvh - 390px); overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg-input); }
+@media (max-width: 1000px) {
+  .db-manager-layout { grid-template-columns: 190px minmax(0, 1fr); }
+  .db-cache-status { width: 100%; }
+  .db-data-grid { max-height: 400px; }
+}
+@media (max-width: 720px) {
+  .db-manager-layout { grid-template-columns: minmax(0, 1fr); }
+  .db-table-sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
+  .db-table-sidebar nav { max-height: 200px; min-height: 0; }
+}

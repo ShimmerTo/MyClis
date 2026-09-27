@@ -240,7 +240,7 @@ export function saveClipboardImage(): string | null {
  * 而且必须按 UTF-16 解码 —— clipboard.read('FileNameW') 会按 UTF-8 解成乱码。
  * text/uri-list 对「复制文件」这个场景基本无效，只当最后兜底。
  */
-function clipboardFilePaths(): string[] {
+export function clipboardFilePaths(): string[] {
   try {
     const buf = clipboard.readBuffer('FileNameW')
     if (buf && buf.length > 0) {
@@ -273,11 +273,7 @@ function clipboardFilePaths(): string[] {
   }
 }
 
-/**
- * 读一次剪贴板。优先级 文件 → 图片 → 文本：
- * 与终端粘贴的「图片优先」相反 —— 便签要的是地址而不是字节，
- * 而资源管理器复制图片文件时剪贴板同时带图片表示，按图片优先会复制出一份字节副本。
- */
+/** 资源管理器复制图片可能同时带图片表示，先取路径以免复制出多余字节副本。 */
 export function readClipboardForNote(): ClipboardPayload {
   const files = clipboardFilePaths()
   if (files.length > 0) return { kind: 'files', paths: files }

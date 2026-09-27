@@ -66,6 +66,7 @@ export function TranscriptModal(props: Props): JSX.Element {
     let alive = true
     if (!tab?.nativeSessionId) {
       setPage(null)
+      setLoading(false)
       return () => {
         alive = false
       }
@@ -73,7 +74,7 @@ export function TranscriptModal(props: Props): JSX.Element {
     setLoading(true)
     setPage(null)
     window.clichilds
-      .transcriptRead({ cli: tab.cli, nativeSessionId: tab.nativeSessionId })
+      .transcriptRead({ cli: tab.cli, nativeSessionId: tab.nativeSessionId, cwd: tab.cwd })
       .then((p) => alive && setPage(p))
       .catch(() =>
         alive && setPage({ entries: [], truncated: false, totalBytes: 0, reason: 'file-missing' })
@@ -83,7 +84,7 @@ export function TranscriptModal(props: Props): JSX.Element {
       alive = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab?.cli, tab?.nativeSessionId])
+  }, [tab?.cli, tab?.nativeSessionId, tab?.cwd])
 
   const body = (): JSX.Element => {
     if (!tab?.nativeSessionId) return <div className="chat-empty">未记录该 CLI 的 session id，读不到正文</div>
@@ -178,7 +179,7 @@ export function TranscriptModal(props: Props): JSX.Element {
             <button
               type="button"
               disabled={!props.onResume || !!props.resumeDisabledReason}
-              title={props.resumeDisabledReason || '用该 CLI 的原生 resume 继续此主会话'}
+              title={props.resumeDisabledReason || '用该 CLI 的原生 resume 继续此会话'}
               onClick={props.onResume}
             >
               继续此会话

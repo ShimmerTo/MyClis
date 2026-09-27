@@ -64,12 +64,11 @@ MyClis 通过CLI自主分配任务给任意子CLI，让它们同时开工并收�
 
 ## 5. 下载与安装
 
-到 [Releases](https://github.com/ShimmerTo/MyClis/releases) 下载，两个包功能一样：
+到 [Releases](https://github.com/ShimmerTo/MyClis/releases) 下载 `myclis-setup-0.1.97.exe`（NSIS 安装版，可自选安装目录，会建桌面快捷方式，能卸载）。
 
-| 文件 | 说明 |
-| --- | --- |
-| `myclis-setup-<版本>.exe` | 安装版（NSIS），可自选安装目录，会建桌面快捷方式，能卸载 |
-| `myclis-portable-<版本>.exe` | 便携版，双击就跑，不用装 |
+装好后应用会自己在后台看 GitHub 上有没有新版：有新版时左侧「设置」导航项上一个小红点，设置页「版本与更新」里能看更新日志、手动检查或下载。勾上「自动下载」后，安装包会在下次启动时静默安装。
+
+每个版本的变更都记在 [update.md](update.md)（仓库根的累计更新日志，随源码走）。应用里「版本与更新」展示的日志取自 GitHub Release 正文，两者不是同一份。
 
 **NOTE: 需要先自己装好至少一个受支持的 CLI，并且它能在你自己的终端里正常跑起来。**
 MyClis 不附带这些 CLI，也不代管它们的账号、额度与登录状态。
